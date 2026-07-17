@@ -101,6 +101,24 @@ bool XrShell::CreateInstance(android_app* app) {
        XR_VERSION_MAJOR(props.runtimeVersion),
        XR_VERSION_MINOR(props.runtimeVersion),
        XR_VERSION_PATCH(props.runtimeVersion), local_floor_available_);
+
+  // AR: prefer alpha-blend (video passthrough behind rendered alpha).
+  uint32_t nmodes = 0;
+  xrEnumerateEnvironmentBlendModes(instance_, system_id_,
+                                   XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                   0, &nmodes, nullptr);
+  std::vector<XrEnvironmentBlendMode> modes(nmodes);
+  xrEnumerateEnvironmentBlendModes(instance_, system_id_,
+                                   XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                   nmodes, &nmodes, modes.data());
+  for (XrEnvironmentBlendMode m : modes) {
+    if (m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) {
+      blend_mode_ = m;
+      break;
+    }
+  }
+  LOGI("environment blend mode: %s",
+       passthrough() ? "ALPHA_BLEND (passthrough)" : "OPAQUE");
   return true;
 }
 
@@ -558,12 +576,17 @@ bool XrShell::EndFrame(
   layer.space = app_space_;
   layer.viewCount = static_cast<uint32_t>(proj_views.size());
   layer.views = proj_views.data();
+  if (passthrough()) {
+    // Straight-alpha layer blended over the camera feed.
+    layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                       XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+  }
   const XrCompositionLayerBaseHeader* layers[] = {
       reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer)};
 
   XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
   info.displayTime = frame_state.predictedDisplayTime;
-  info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+  info.environmentBlendMode = blend_mode_;
   info.layerCount = proj_views.empty() ? 0 : 1;
   info.layers = proj_views.empty() ? nullptr : layers;
   return XrOk(xrEndFrame(session_, &info), "xrEndFrame");

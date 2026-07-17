@@ -20,7 +20,10 @@
 #include <mujoco/mujoco.h>
 
 static const mjtNum MXR_Q_WS[4] = {0.5, 0.5, -0.5, -0.5};  // wxyz
-static const mjtNum MXR_T_WS[3] = {-1.0, 0.0, 0.0};
+// Robot base ~1 m in front of the user; MJ z=0 (robot base = table top,
+// assets/ar_scene.xml) sits 0.73 m above the physical floor so the virtual
+// table stands on it.
+static const mjtNum MXR_T_WS[3] = {-1.0, 0.0, -0.73};
 
 // XR quaternion (xyzw) -> MuJoCo world quaternion (wxyz): q_ws (x) q_xr.
 static inline void mxr_quat_xr_to_mj(const XrQuaternionf* q_xr,

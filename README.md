@@ -10,16 +10,20 @@ Python, no desktop in the loop.
 - **On-device physics** — unmodified upstream MuJoCo v3.10.0 (fetched and
   pinned at build time, zero source patches) compiled GL-free via the
   filament-mjr-compat flag set; the unmodified MuJoCo Menagerie Franka scene
-  steps at 500 Hz on the headset CPU.
+  steps at 500 Hz on the headset CPU — composed onto a table in an AR
+  scene (`assets/ar_scene.xml`) without touching the upstream files.
 - **Raw OpenXR shell** — `NativeActivity` + Khronos loader:
   `XR_KHR_vulkan_enable2` device handshake, `LOCAL_FLOOR` reference space
   (STAGE/LOCAL fallbacks), full session lifecycle, Touch-controller action
   set (grip pose, trigger, squeeze, A).
+- **AR passthrough** — alpha-blend environment mode when the runtime
+  offers it (Pico/Quest-class MR): the scene renders over the camera feed;
+  no skybox, no ground plane. The robot stands on a virtual table whose
+  legs meet your physical floor.
 - **Scene-specific Vulkan renderer** — consumes the renderer-agnostic
   `mjvScene`: meshes de-indexed at load by welding (vertex, normal) index
   pairs, one pipeline with 128-byte push constants, per-eye stereo passes
-  driven exclusively by `XrView` pose/fov, procedural checker floor, one
-  directional light.
+  driven exclusively by `XrView` pose/fov, one directional light.
 - **Clutched teleop** — squeeze-hold clutch latches controller→target
   offsets in MuJoCo world coordinates (zero jump on engage, by
   construction); damped-least-squares IK (6D task, 7-DOF arm) with a

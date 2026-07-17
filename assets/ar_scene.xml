@@ -1,0 +1,12 @@
+<mujoco model="panda AR scene">
+  <!-- AR composition: the unmodified Menagerie panda.xml on a simple table
+       whose top sits at z=0 (the robot base plane), extending down 0.73 m to
+       the user's physical floor (frames.h maps stage y=0 to MJ z=-0.73).
+       No skybox, no ground plane: the background is passthrough. -->
+  <include file="panda.xml"/>
+
+  <worldbody>
+    <geom name="table" type="box" size="0.45 0.4 0.365" pos="0.15 0 -0.365"
+        rgba="0.46 0.36 0.25 1"/>
+  </worldbody>
+</mujoco>

@@ -1,9 +1,10 @@
 // mjvScene -> Vulkan, scene-specific by design:
-// PLANE + MESH + BOX only, one pipeline, push constants, one hardcoded
-// directional light, procedural checker floor, no textures/shadows/sorting.
-// View/projection come exclusively from XrView pose + XrFovf; mjvGLCamera is
-// bypassed. Meshes are de-indexed at load by welding unique (vertex, normal)
-// index pairs — mesh_facenormal indexes normals separately from vertices.
+// MESH + BOX only (planes are skipped — the AR background is passthrough),
+// one pipeline, push constants, one hardcoded directional light, no
+// textures/shadows/sorting. View/projection come exclusively from XrView
+// pose + XrFovf; mjvGLCamera is bypassed. Meshes are de-indexed at load by
+// welding unique (vertex, normal) index pairs — mesh_facenormal indexes
+// normals separately from vertices.
 
 #ifndef MUJOCOXR_APP_SCENE_RENDERER_H_
 #define MUJOCOXR_APP_SCENE_RENDERER_H_
@@ -53,7 +54,6 @@ class SceneRenderer {
   VkBuffer ibuf_ = VK_NULL_HANDLE;
   VkDeviceMemory imem_ = VK_NULL_HANDLE;
 
-  MeshRange plane_range_;
   MeshRange box_range_;
   std::vector<MeshRange> mesh_ranges_;  // per meshid
   float stage_from_world_[16] = {0};

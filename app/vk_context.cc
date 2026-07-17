@@ -236,7 +236,8 @@ void VkContext::BeginEyePass(VkCommandBuffer cmd, int eye_index,
                              uint32_t image_index) {
   const EyeTarget& eye = eyes_[eye_index];
   VkClearValue clears[2];
-  clears[0].color = {{0.10f, 0.12f, 0.16f, 1.0f}};
+  clears[0].color = {{clear_color_[0], clear_color_[1], clear_color_[2],
+                      clear_color_[3]}};
   clears[1].depthStencil = {1.0f, 0};
   VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
   rp.renderPass = render_pass_;

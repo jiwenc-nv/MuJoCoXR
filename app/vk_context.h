@@ -37,6 +37,14 @@ class VkContext {
   VkFormat color_format() const { return color_format_; }
   const EyeTarget& eye(int i) const { return eyes_[i]; }
 
+  // Transparent black for passthrough AR; opaque color otherwise.
+  void SetClearColor(float r, float g, float b, float a) {
+    clear_color_[0] = r;
+    clear_color_[1] = g;
+    clear_color_[2] = b;
+    clear_color_[3] = a;
+  }
+
   // Frame recording: one command buffer per frame, both eyes, one submit.
   VkCommandBuffer BeginFrameCommands();
   void BeginEyePass(VkCommandBuffer cmd, int eye, uint32_t image_index);
@@ -62,6 +70,7 @@ class VkContext {
   VkRenderPass render_pass_ = VK_NULL_HANDLE;
   VkFormat color_format_ = VK_FORMAT_UNDEFINED;
   VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
+  float clear_color_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
   std::vector<EyeTarget> eyes_;
 };
 

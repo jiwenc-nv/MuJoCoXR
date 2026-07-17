@@ -67,6 +67,10 @@ class XrShell {
   XrSpace app_space() const { return app_space_; }
   int64_t swapchain_format() const { return swapchain_format_; }
   const std::vector<SwapchainInfo>& swapchains() const { return swapchains_; }
+  // ALPHA_BLEND (passthrough AR) when the runtime offers it, else OPAQUE.
+  bool passthrough() const {
+    return blend_mode_ == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+  }
 
   // Frame flow.
   bool WaitBeginFrame(XrFrameState* frame_state);
@@ -90,6 +94,7 @@ class XrShell {
   XrSpace app_space_ = XR_NULL_HANDLE;
   bool local_floor_available_ = false;
   bool bd_controllers_available_ = false;  // XR_BD_controller_interaction
+  XrEnvironmentBlendMode blend_mode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
   bool session_running_ = false;
   XrSessionState session_state_ = XR_SESSION_STATE_UNKNOWN;
   int64_t swapchain_format_ = 0;

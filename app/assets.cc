@@ -40,7 +40,8 @@ mjModel* mxr_load_model_from_assets(AAssetManager* am) {
   LOGI("VFS: %d files registered", nfiles);
 
   char err[1024] = {0};
-  mjModel* m = mj_loadXML("scene.xml", vfs, err, sizeof(err));
+  // AR composition: unmodified panda.xml on a table, no skybox/ground plane.
+  mjModel* m = mj_loadXML("ar_scene.xml", vfs, err, sizeof(err));
   if (!m) {
     LOGE("mj_loadXML failed: %s", err);
   } else {

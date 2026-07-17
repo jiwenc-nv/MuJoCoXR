@@ -82,6 +82,9 @@ void android_main(android_app* app) {
     xr.Destroy();
     return;
   }
+  if (xr.passthrough()) {
+    vk.SetClearColor(0, 0, 0, 0);  // transparent: camera feed behind
+  }
 
   // Model + scene extraction + renderer. A load failure degrades to a
   // clear-color loop so the failure is visible (and logged) in-headset.

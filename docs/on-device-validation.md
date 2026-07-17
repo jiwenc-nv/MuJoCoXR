@@ -64,8 +64,8 @@ using the runtime's perf HUD (e.g. OVR Metrics on Quest).
 
 ## 3. Render + handedness (BEFORE trusting any teleop motion)
 
-- The Panda stands on the checker floor in its home pose, ~1 m in front of
-  the user (robot base at the MuJoCo origin; user forward = MJ +x).
+- The Panda stands on its table in the passthrough view, ~1 m in front of
+  the user with the table legs on the physical floor (user forward = MJ +x).
 - World-axes gizmo at the robot base: red = MJ +x (away from the user),
   green = MJ +y (user's LEFT), blue = MJ +z (up) — REP-103 (x fwd, y left,
   z up).

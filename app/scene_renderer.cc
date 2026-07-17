@@ -15,7 +15,6 @@ namespace {
 
 constexpr float kNearZ = 0.05f;
 constexpr float kFarZ = 50.0f;
-constexpr float kInfinitePlaneHalfExtent = 10.0f;  // floor size[0] == 0
 const float kLightDirWorld[3] = {0.35f, -0.25f, -1.0f};  // one light, fixed
 
 struct Vertex {
@@ -158,16 +157,6 @@ bool SceneRenderer::Create(VkContext* vk, const mjModel* m) {
 bool SceneRenderer::UploadGeometry(const mjModel* m) {
   std::vector<Vertex> verts;
   std::vector<uint32_t> indices;
-
-  // Unit plane: quad in local xy, normal +z.
-  plane_range_.base_vertex = 0;
-  plane_range_.first_index = 0;
-  plane_range_.index_count = 6;
-  verts.insert(verts.end(), {{{-1, -1, 0}, {0, 0, 1}},
-                             {{1, -1, 0}, {0, 0, 1}},
-                             {{1, 1, 0}, {0, 0, 1}},
-                             {{-1, 1, 0}, {0, 0, 1}}});
-  indices.insert(indices.end(), {0, 1, 2, 0, 2, 3});
 
   // Unit box: 6 faces x 4 verts, half-extent 1.
   box_range_.base_vertex = static_cast<int32_t>(verts.size());
@@ -422,14 +411,9 @@ void SceneRenderer::Draw(VkCommandBuffer cmd, int eye, const mjvScene* scn) {
     const mjvGeom* g = scn->geoms + i;
     const MeshRange* range = nullptr;
     float scale[3] = {1, 1, 1};
-    bool checker = false;
     switch (g->type) {
       case mjGEOM_PLANE:
-        range = &plane_range_;
-        scale[0] = g->size[0] > 0 ? g->size[0] : kInfinitePlaneHalfExtent;
-        scale[1] = g->size[1] > 0 ? g->size[1] : kInfinitePlaneHalfExtent;
-        checker = true;
-        break;
+        continue;  // AR: no ground plane; passthrough is the background
       case mjGEOM_BOX:
         range = &box_range_;
         scale[0] = g->size[0];
@@ -449,7 +433,7 @@ void SceneRenderer::Draw(VkCommandBuffer cmd, int eye, const mjvScene* scn) {
         break;
       }
       default:
-        continue;  // census: PLANE + MESH + BOX only
+        continue;  // census: MESH + BOX only
     }
 
     PushConstants pc;
@@ -472,7 +456,6 @@ void SceneRenderer::Draw(VkCommandBuffer cmd, int eye, const mjvScene* scn) {
       }
       ncols[c][3] = 0;
     }
-    pc.ncol0[3] = checker ? 1.0f : 0.0f;
     memcpy(pc.color, g->rgba, sizeof(pc.color));
 
     vkCmdPushConstants(cmd, layout_,
