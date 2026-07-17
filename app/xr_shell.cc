@@ -281,7 +281,8 @@ bool XrShell::CreateActions() {
             "xrCreateActionSet")) {
     return false;
   }
-  xrStringToPath(instance_, "/user/hand/right", &right_hand_path_);
+  xrStringToPath(instance_, "/user/hand/right", &hand_paths_[0]);
+  xrStringToPath(instance_, "/user/hand/left", &hand_paths_[1]);
 
   struct {
     const char* name;
@@ -291,23 +292,23 @@ bool XrShell::CreateActions() {
       {"grip_pose", XR_ACTION_TYPE_POSE_INPUT, &grip_action_},
       {"trigger", XR_ACTION_TYPE_FLOAT_INPUT, &trigger_action_},
       {"squeeze", XR_ACTION_TYPE_FLOAT_INPUT, &squeeze_action_},
-      {"a_click", XR_ACTION_TYPE_BOOLEAN_INPUT, &a_action_},
+      {"reset_click", XR_ACTION_TYPE_BOOLEAN_INPUT, &a_action_},
   };
   for (auto& a : actions) {
     XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
     strcpy(info.actionName, a.name);
     strcpy(info.localizedActionName, a.name);
     info.actionType = a.type;
-    info.countSubactionPaths = 1;
-    info.subactionPaths = &right_hand_path_;
+    info.countSubactionPaths = 2;
+    info.subactionPaths = hand_paths_;
     if (!XrOk(xrCreateAction(action_set_, &info, a.action),
               "xrCreateAction")) {
       return false;
     }
   }
 
-  // Oculus Touch profile; B deliberately unbound (squeeze re-engage
-  // already re-anchors by construction).
+  // Oculus Touch profile, both hands (reset = A right / X left); B stays
+  // unbound (squeeze re-engage already re-anchors by construction).
   XrPath profile;
   xrStringToPath(instance_, "/interaction_profiles/oculus/touch_controller",
                  &profile);
@@ -321,12 +322,16 @@ bool XrShell::CreateActions() {
       {trigger_action_, path("/user/hand/right/input/trigger/value")},
       {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
       {a_action_, path("/user/hand/right/input/a/click")},
+      {grip_action_, path("/user/hand/left/input/grip/pose")},
+      {trigger_action_, path("/user/hand/left/input/trigger/value")},
+      {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
+      {a_action_, path("/user/hand/left/input/x/click")},
   };
   XrInteractionProfileSuggestedBinding suggested{
       XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
   suggested.interactionProfile = profile;
   suggested.suggestedBindings = bindings;
-  suggested.countSuggestedBindings = 4;
+  suggested.countSuggestedBindings = 8;
   if (!XrOk(xrSuggestInteractionProfileBindings(instance_, &suggested),
             "xrSuggestInteractionProfileBindings")) {
     return false;
@@ -340,17 +345,59 @@ bool XrShell::CreateActions() {
     return false;
   }
 
-  XrActionSpaceCreateInfo space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
-  space_info.action = grip_action_;
-  space_info.subactionPath = right_hand_path_;
-  space_info.poseInActionSpace = {{0, 0, 0, 1}, {0, 0, 0}};
-  return XrOk(xrCreateActionSpace(session_, &space_info, &grip_space_),
-              "xrCreateActionSpace");
+  for (int h = 0; h < 2; ++h) {
+    XrActionSpaceCreateInfo space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    space_info.action = grip_action_;
+    space_info.subactionPath = hand_paths_[h];
+    space_info.poseInActionSpace = {{0, 0, 0, 1}, {0, 0, 0}};
+    if (!XrOk(xrCreateActionSpace(session_, &space_info, &grip_spaces_[h]),
+              "xrCreateActionSpace")) {
+      return false;
+    }
+  }
+  return true;
 }
+
+void XrShell::LogInteractionProfiles() {
+  const char* hands[2] = {"right", "left"};
+  for (int h = 0; h < 2; ++h) {
+    XrInteractionProfileState st{XR_TYPE_INTERACTION_PROFILE_STATE};
+    if (XR_FAILED(
+            xrGetCurrentInteractionProfile(session_, hand_paths_[h], &st))) {
+      continue;
+    }
+    if (st.interactionProfile == XR_NULL_PATH) {
+      LOGW("interaction profile (%s): NONE bound", hands[h]);
+    } else {
+      char buf[XR_MAX_PATH_LENGTH];
+      uint32_t len = 0;
+      xrPathToString(instance_, st.interactionProfile, sizeof(buf), &len, buf);
+      LOGI("interaction profile (%s): %s", hands[h], buf);
+    }
+  }
+}
+
+namespace {
+const char* SessionStateName(XrSessionState s) {
+  switch (s) {
+    case XR_SESSION_STATE_IDLE: return "IDLE";
+    case XR_SESSION_STATE_READY: return "READY";
+    case XR_SESSION_STATE_SYNCHRONIZED: return "SYNCHRONIZED";
+    case XR_SESSION_STATE_VISIBLE: return "VISIBLE";
+    case XR_SESSION_STATE_FOCUSED: return "FOCUSED";
+    case XR_SESSION_STATE_STOPPING: return "STOPPING";
+    case XR_SESSION_STATE_LOSS_PENDING: return "LOSS_PENDING";
+    case XR_SESSION_STATE_EXITING: return "EXITING";
+    default: return "?";
+  }
+}
+}  // namespace
 
 void XrShell::HandleSessionStateChange(
     const XrEventDataSessionStateChanged& ev, bool* exit_render_loop) {
   session_state_ = ev.state;
+  // Input only flows in FOCUSED; if this never appears, no controller data.
+  LOGI("session state -> %s", SessionStateName(ev.state));
   switch (ev.state) {
     case XR_SESSION_STATE_READY: {
       XrSessionBeginInfo info{XR_TYPE_SESSION_BEGIN_INFO};
@@ -366,6 +413,9 @@ void XrShell::HandleSessionStateChange(
       session_running_ = false;
       XrOk(xrEndSession(session_), "xrEndSession");
       LOGI("session stopped");
+      break;
+    case XR_SESSION_STATE_FOCUSED:
+      LogInteractionProfiles();
       break;
     case XR_SESSION_STATE_EXITING:
     case XR_SESSION_STATE_LOSS_PENDING:
@@ -393,12 +443,15 @@ void XrShell::PollEvents(bool* exit_render_loop, XrInputState* input) {
         *exit_render_loop = true;
         break;
       case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
-        // Reviewer advisory: recentering mid-clutch causes a controller-pose
-        // jump; teleop auto-disengages on this flag.
+        // Recentering mid-clutch causes a controller-pose jump; teleop
+        // auto-disengages on this flag.
         if (input) {
           input->recenter = true;
         }
         LOGI("reference space change pending (recenter)");
+        break;
+      case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+        LogInteractionProfiles();
         break;
       default:
         break;
@@ -474,27 +527,53 @@ bool XrShell::EndFrame(
 void XrShell::SyncInput(XrTime time, XrInputState* input) {
   input->grip_valid = false;
   input->a_click = false;
+  ++sync_count_;
 
   XrActiveActionSet active{action_set_, XR_NULL_PATH};
   XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
   sync.countActiveActionSets = 1;
   sync.activeActionSets = &active;
-  if (!XrOk(xrSyncActions(session_, &sync), "xrSyncActions")) {
+  XrResult sr = xrSyncActions(session_, &sync);
+  if (XR_FAILED(sr)) {
+    XrOk(sr, "xrSyncActions");
     return;
+  }
+  if (sr == XR_SESSION_NOT_FOCUSED && sync_count_ % 90 == 0) {
+    LOGW("input: session not focused — runtime is withholding controller "
+         "data (state %s)", SessionStateName(session_state_));
+  }
+
+  // First hand with a valid grip pose wins (0 = right, 1 = left).
+  int hand = -1;
+  for (int h = 0; h < 2 && hand < 0; ++h) {
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_SUCCEEDED(xrLocateSpace(grip_spaces_[h], app_space_, time, &loc))) {
+      constexpr XrSpaceLocationFlags kValid =
+          XR_SPACE_LOCATION_POSITION_VALID_BIT |
+          XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+      if ((loc.locationFlags & kValid) == kValid) {
+        input->grip_valid = true;
+        input->grip = loc.pose;
+        hand = h;
+      }
+    }
   }
 
   XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
-  get.subactionPath = right_hand_path_;
+  get.subactionPath = hand < 0 ? hand_paths_[0] : hand_paths_[hand];
+  bool trig_active = false, sqz_active = false;
 
   get.action = trigger_action_;
   XrActionStateFloat f{XR_TYPE_ACTION_STATE_FLOAT};
   if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &get, &f)) && f.isActive) {
     input->trigger = f.currentState;
+    trig_active = true;
   }
   get.action = squeeze_action_;
   f = {XR_TYPE_ACTION_STATE_FLOAT};
   if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &get, &f)) && f.isActive) {
     input->squeeze = f.currentState;
+    sqz_active = true;
   }
   get.action = a_action_;
   XrActionStateBoolean b{XR_TYPE_ACTION_STATE_BOOLEAN};
@@ -503,15 +582,11 @@ void XrShell::SyncInput(XrTime time, XrInputState* input) {
     input->a_click = b.currentState && b.changedSinceLastSync;
   }
 
-  XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-  if (XR_SUCCEEDED(xrLocateSpace(grip_space_, app_space_, time, &loc))) {
-    constexpr XrSpaceLocationFlags kValid =
-        XR_SPACE_LOCATION_POSITION_VALID_BIT |
-        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    if ((loc.locationFlags & kValid) == kValid) {
-      input->grip_valid = true;
-      input->grip = loc.pose;
-    }
+  if (sync_count_ % 90 == 0) {
+    LOGI("input: hand=%s grip_valid=%d sqz=%.2f(active=%d) trig=%.2f(active=%d)",
+         hand < 0 ? "none" : (hand == 0 ? "right" : "left"),
+         input->grip_valid, input->squeeze, sqz_active, input->trigger,
+         trig_active);
   }
 }
 
@@ -522,8 +597,10 @@ void XrShell::Destroy() {
     }
   }
   swapchains_.clear();
-  if (grip_space_ != XR_NULL_HANDLE) {
-    xrDestroySpace(grip_space_);
+  for (int h = 0; h < 2; ++h) {
+    if (grip_spaces_[h] != XR_NULL_HANDLE) {
+      xrDestroySpace(grip_spaces_[h]);
+    }
   }
   if (action_set_ != XR_NULL_HANDLE) {
     xrDestroyActionSet(action_set_);

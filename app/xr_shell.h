@@ -95,13 +95,18 @@ class XrShell {
   std::vector<XrViewConfigurationView> config_views_;
   std::vector<SwapchainInfo> swapchains_;
 
+  void LogInteractionProfiles();
+
   XrActionSet action_set_ = XR_NULL_HANDLE;
   XrAction grip_action_ = XR_NULL_HANDLE;
   XrAction trigger_action_ = XR_NULL_HANDLE;
   XrAction squeeze_action_ = XR_NULL_HANDLE;
   XrAction a_action_ = XR_NULL_HANDLE;
-  XrPath right_hand_path_ = XR_NULL_PATH;
-  XrSpace grip_space_ = XR_NULL_HANDLE;
+  // Both hands bound; per frame the first hand with a valid grip pose wins
+  // (index 0 = right, 1 = left).
+  XrPath hand_paths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
+  XrSpace grip_spaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+  int64_t sync_count_ = 0;
 };
 
 #endif  // MUJOCOXR_APP_XR_SHELL_H_
