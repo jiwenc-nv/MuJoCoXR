@@ -1,0 +1,21 @@
+# host reference for the on-device invariant check
+# recorded 2026-07-17 on x86_64 GNU/Linux, gcc 13, CMAKE_BUILD_TYPE=Release
+mujoco_version = 3.10.0
+nq = 9
+nv = 9
+nu = 8
+timestep = 0.002
+integrator = 3
+nsteps = 1000
+qpos[0] = -0.30379140305321106
+qpos[1] = 0.0059750479947434532
+qpos[2] = -0.0011668737518481661
+qpos[3] = -1.6190170094482925
+qpos[4] = -0.00042854743389525939
+qpos[5] = 1.8402954781005745
+qpos[6] = -0.78528934128605166
+qpos[7] = 1.0800937522697815e-06
+qpos[8] = 3.5975120625646021e-05
+energy_potential = 89.021034172834391
+energy_kinetic = 1.2616208785915486
+moved_linf_vs_home = 0.30379140305321106
