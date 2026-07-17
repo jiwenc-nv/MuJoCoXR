@@ -89,6 +89,7 @@ class XrShell {
   XrSession session_ = XR_NULL_HANDLE;
   XrSpace app_space_ = XR_NULL_HANDLE;
   bool local_floor_available_ = false;
+  bool bd_controllers_available_ = false;  // XR_BD_controller_interaction
   bool session_running_ = false;
   XrSessionState session_state_ = XR_SESSION_STATE_UNKNOWN;
   int64_t swapchain_format_ = 0;

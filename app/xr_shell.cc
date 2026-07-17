@@ -53,6 +53,10 @@ bool XrShell::CreateInstance(android_app* app) {
     if (!strcmp(e.extensionName, XR_EXT_LOCAL_FLOOR_EXTENSION_NAME)) {
       local_floor_available_ = true;
     }
+    // Pico controllers use ByteDance's own interaction profiles.
+    if (!strcmp(e.extensionName, "XR_BD_controller_interaction")) {
+      bd_controllers_available_ = true;
+    }
   }
 
   std::vector<const char*> enabled = {
@@ -61,6 +65,9 @@ bool XrShell::CreateInstance(android_app* app) {
   };
   if (local_floor_available_) {
     enabled.push_back(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME);
+  }
+  if (bd_controllers_available_) {
+    enabled.push_back("XR_BD_controller_interaction");
   }
 
   XrInstanceCreateInfoAndroidKHR android_info{
@@ -307,35 +314,73 @@ bool XrShell::CreateActions() {
     }
   }
 
-  // Oculus Touch profile, both hands (reset = A right / X left); B stays
+  // Per-profile suggestions, one call each. Same semantics everywhere:
+  // squeeze = clutch, trigger = analog gripper, A/X = reset; B stays
   // unbound (squeeze re-engage already re-anchors by construction).
-  XrPath profile;
-  xrStringToPath(instance_, "/interaction_profiles/oculus/touch_controller",
-                 &profile);
   auto path = [&](const char* p) {
     XrPath out;
     xrStringToPath(instance_, p, &out);
     return out;
   };
-  XrActionSuggestedBinding bindings[] = {
-      {grip_action_, path("/user/hand/right/input/grip/pose")},
-      {trigger_action_, path("/user/hand/right/input/trigger/value")},
-      {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
-      {a_action_, path("/user/hand/right/input/a/click")},
-      {grip_action_, path("/user/hand/left/input/grip/pose")},
-      {trigger_action_, path("/user/hand/left/input/trigger/value")},
-      {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
-      {a_action_, path("/user/hand/left/input/x/click")},
+  auto suggest = [&](const char* profile_path,
+                     std::vector<XrActionSuggestedBinding> b) {
+    XrInteractionProfileSuggestedBinding s{
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    s.interactionProfile = path(profile_path);
+    s.suggestedBindings = b.data();
+    s.countSuggestedBindings = static_cast<uint32_t>(b.size());
+    XrResult r = xrSuggestInteractionProfileBindings(instance_, &s);
+    if (XR_FAILED(r)) {
+      LOGW("suggest bindings %s failed: %d", profile_path, r);
+      return false;
+    }
+    LOGI("suggested bindings: %s", profile_path);
+    return true;
   };
-  XrInteractionProfileSuggestedBinding suggested{
-      XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-  suggested.interactionProfile = profile;
-  suggested.suggestedBindings = bindings;
-  suggested.countSuggestedBindings = 8;
-  if (!XrOk(xrSuggestInteractionProfileBindings(instance_, &suggested),
-            "xrSuggestInteractionProfileBindings")) {
-    return false;
+
+  if (!suggest("/interaction_profiles/oculus/touch_controller",
+               {{grip_action_, path("/user/hand/right/input/grip/pose")},
+                {trigger_action_, path("/user/hand/right/input/trigger/value")},
+                {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
+                {a_action_, path("/user/hand/right/input/a/click")},
+                {grip_action_, path("/user/hand/left/input/grip/pose")},
+                {trigger_action_, path("/user/hand/left/input/trigger/value")},
+                {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
+                {a_action_, path("/user/hand/left/input/x/click")}})) {
+    return false;  // core profile: failure means the setup itself is broken
   }
+
+  // Pico (ByteDance) native profiles — Pico 4 and Pico 4 Ultra/4S. Grip is
+  // bound to both squeeze/value and squeeze/click (floats combine by max;
+  // click arrives as 0/1 where the analog source is absent).
+  if (bd_controllers_available_) {
+    for (const char* p :
+         {"/interaction_profiles/bytedance/pico4_controller",
+          "/interaction_profiles/bytedance/pico4s_controller"}) {
+      suggest(
+          p,
+          {{grip_action_, path("/user/hand/right/input/grip/pose")},
+           {trigger_action_, path("/user/hand/right/input/trigger/value")},
+           {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
+           {squeeze_action_, path("/user/hand/right/input/squeeze/click")},
+           {a_action_, path("/user/hand/right/input/a/click")},
+           {grip_action_, path("/user/hand/left/input/grip/pose")},
+           {trigger_action_, path("/user/hand/left/input/trigger/value")},
+           {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
+           {squeeze_action_, path("/user/hand/left/input/squeeze/click")},
+           {a_action_, path("/user/hand/left/input/x/click")}});
+    }
+  }
+
+  // Last-resort fallback: khr/simple_controller — select (0/1 float
+  // conversion) drives the clutch, menu resets; no analog gripper exists.
+  suggest("/interaction_profiles/khr/simple_controller",
+          {{grip_action_, path("/user/hand/right/input/grip/pose")},
+           {squeeze_action_, path("/user/hand/right/input/select/click")},
+           {a_action_, path("/user/hand/right/input/menu/click")},
+           {grip_action_, path("/user/hand/left/input/grip/pose")},
+           {squeeze_action_, path("/user/hand/left/input/select/click")},
+           {a_action_, path("/user/hand/left/input/menu/click")}});
 
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
