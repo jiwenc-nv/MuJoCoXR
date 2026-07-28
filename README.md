@@ -96,12 +96,46 @@ Browser app (Quest Browser, or desktop Chrome's DevTools WebXR panel):
 ```
 emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
 cmake --build build-web --parallel --target mxr baseline teleop_replay
-cd build-web && python3 -m http.server 8000
-# on a headset: adb reverse tcp:8000 tcp:8000, then open http://localhost:8000
+cd build-web && python3 -m http.server 8000   # then open http://localhost:8000
 ```
 
 Build **named targets only, never `all`** — upstream's wasm subdirectory is
 added unconditionally under Emscripten and writes into the source tree.
+
+### On a headset
+
+WebXR requires a **secure context**. `https://` and `localhost` qualify;
+`http://<LAN-IP>:8000` does not, and on an insecure origin `navigator.xr` is
+undefined — which looks identical to a browser with no WebXR at all. The
+shell tells the two apart so you do not go and install a different browser.
+
+Prefer adb. It needs no certificate and no warning to click through, because
+localhost is trusted by definition:
+
+```
+adb reverse tcp:8000 tcp:8000                      # over USB
+# wireless: adb tcpip 5555 && adb connect <headset-ip>:5555, then reverse
+```
+
+then open `http://localhost:8000` in the headset browser.
+
+Where adb is not an option, serve TLS with a self-signed certificate:
+
+```
+scripts/serve-web-tls.py build-web 8443            # prints the URL to open
+```
+
+The certificate carries the address in `subjectAltName`, because Chromium
+rejects a CN-only certificate outright instead of offering the warning you
+need to click through. Accept it once per origin. **Unverified on a headset
+browser** — the bypass-then-secure-context behaviour is how self-signed WebXR
+development normally works, but nothing here has run on a device; if the
+browser still refuses to enter XR, use adb.
+
+Neither server compresses. `mxr.data` is 34 MB on the wire (5 MB gzipped), so
+over Wi-Fi the first load is slow and the browser cache is what makes the
+second one fast. If the page never loads at all, check the dev box firewall
+before anything else — the port has to be reachable.
 
 Headset app:
 
@@ -145,7 +179,8 @@ green — nothing here has ever run on a headset.
 - `bench/` — invariant baseline recorder/checker, teleop replay, `testspeed`
 - `baselines/` — recorded references: the cross-platform invariant, and the
   host teleop-refactor lock
-- `scripts/` — Menagerie scene fetcher (sparse, pinned)
+- `scripts/` — Menagerie scene fetcher (sparse, pinned), and a TLS dev
+  server for headsets that cannot be reached over adb
 - `docs/` — per-target validation guides, with shared gate numbering
 
 ## License notes

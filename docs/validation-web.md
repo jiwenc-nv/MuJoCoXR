@@ -51,9 +51,21 @@ cd build-web && python3 -m http.server 8000
 ```
 
 Python 3.12 already returns `Content-Type: application/wasm` for `.wasm`; no
-custom server is needed. On a headset, `adb reverse tcp:8000 tcp:8000` then
+custom server is needed. On a headset, `adb reverse tcp:8000 tcp:8000` (or
+`adb tcpip 5555 && adb connect <headset-ip>:5555` first, for wireless) then
 open `http://localhost:8000` — **localhost is a secure context, so WebXR
 works with no TLS and no certificates.**
+
+Where adb is not available, `scripts/serve-web-tls.py build-web 8443` serves
+the same tree over HTTPS with a self-signed certificate carrying the address
+in `subjectAltName` — Chromium rejects a CN-only certificate outright rather
+than offering the click-through you need. The warning is accepted once per
+origin. **UN-RUN on a headset browser:** `blocked on: a device.` The
+adb path is the one to trust until that changes.
+
+Neither server compresses, so `mxr.data` is 34 MB on the wire against the
+4.98 MB it gzips to. First load over Wi-Fi is slow by that ratio; the browser
+cache is what makes the second one fast.
 
 **No COOP/COEP headers are required.** Every WebXR-plus-wasm tutorial says
 otherwise, and following one will cost you an hour. Those headers exist to
@@ -334,7 +346,7 @@ and frame-period p99 stable. Thermal behaviour is device-only.
 | Symptom | Likely cause | Where to look |
 |---|---|---|
 | Blank page, no status text | The ES module failed to load; `mxr.js` is a module and needs `type="module"` | Browser console |
-| `this page is not a secure context…` | Served over plain `http://` from a non-localhost host. `navigator.xr` is undefined on an insecure origin, which looks identical to "no WebXR" — the shell distinguishes them so you do not go install a different browser | Use `adb reverse tcp:8000 tcp:8000` and open `http://localhost:8000` |
+| `this page is not a secure context…` | Served over plain `http://` from a non-localhost host. `navigator.xr` is undefined on an insecure origin, which looks identical to "no WebXR" — the shell distinguishes them so you do not go install a different browser | `adb reverse tcp:8000 tcp:8000` + `http://localhost:8000`, or `scripts/serve-web-tls.py` for HTTPS |
 | Scene renders, physics frozen, no errors, `clock = requestAnimationFrame t` | The UA has no `XRFrame.predictedDisplayTime`; expected on WebKit | Gate 2's hard prerequisite |
 | `model load failed: mj_loadXML failed …` | The staged tree is missing or flattened; `meshdir="assets"` needs the subdirectory intact | `build-web/franka/`, and the `file(COPY …)` block in CMakeLists.txt |
 | All 67 meshes fail to load, link was clean | MuJoCo not linked `--whole-archive`; `obj_decoder`/`stl_decoder` self-register from file-scope constructors and get dropped | `MXR_MUJOCO` in CMakeLists.txt |

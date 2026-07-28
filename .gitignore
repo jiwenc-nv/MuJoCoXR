@@ -9,3 +9,7 @@ third_party/
 # Anchored: an unanchored `wasm/` matches at any depth, and the one thing we
 # want ignored is exactly the repo-root directory upstream creates.
 /wasm/
+
+# Python bytecode, from importing or byte-compiling scripts/*.py.
+# Running them directly does not create this; linters and IDEs do.
+__pycache__/
