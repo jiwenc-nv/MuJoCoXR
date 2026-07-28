@@ -1,9 +1,10 @@
 # MuJoCoXR
 
-MuJoCo physics running **fully on-device** on a standalone Android XR headset
-(Quest-class, arm64-v8a), with the Franka Emika Panda teleoperated by an XR
-controller. The MuJoCo C API with a thin shell over a portable core: raw
-OpenXR + Vulkan, no game engine, no Python, no desktop in the loop.
+MuJoCo physics running **fully on-device** on a standalone XR headset
+(Quest-class), with the Franka Emika Panda teleoperated by an XR controller.
+The MuJoCo C API with two thin shells over one shared core: raw
+OpenXR + Vulkan on Android, and WebXR + WebGL2 in the headset browser. No
+game engine, no Python in the app, no desktop in the loop.
 
 ## Features
 
@@ -35,7 +36,7 @@ OpenXR + Vulkan, no game engine, no Python, no desktop in the loop.
   XR↔MuJoCo mapping (`MXR_Q_MJ_FROM_XR = (0.5, 0.5, −0.5, −0.5)` wxyz;
   xyzw↔wxyz quaternion reordering at every crossing), with a world-axes gizmo
   to verify handedness per axis. The axis map is checked on every build by
-  `bench/teleop_replay`.
+  `bench/teleop_replay`, on host and wasm alike.
 - **Cross-platform determinism harness** — a deterministic 2 s control
   excitation with a recorded host reference (`baselines/`); the same binary
   replays it on-device and checks final `qpos` (L∞) and energy, so a broken
@@ -45,6 +46,11 @@ OpenXR + Vulkan, no game engine, no Python, no desktop in the loop.
 - **Gradle-less packaging** — one shell script builds a signed APK with
   `aapt2`/`zipalign`/`apksigner`; scene assets flow APK `assets/` →
   `AAssetManager` → MuJoCo VFS.
+- **WebXR target** — the same core compiled to wasm32, with a WebGL2
+  renderer and a ~425-line hand-written ES module for the session, the
+  gamepad and the opaque-framebuffer bridge. Threads are off, so no
+  `SharedArrayBuffer` and **no COOP/COEP headers**; `python3 -m http.server`
+  plus `adb reverse` is the whole deployment.
 - **Headless verification** — `bench/teleop_replay` gives the teleop logic
   its first execution outside a headset: a golden trajectory that locks the
   refactor, plus the frame-convention axis map, zero engage jump and slew
@@ -58,6 +64,8 @@ OpenXR + Vulkan, no game engine, no Python, no desktop in the loop.
 - Android NDK r26+ and `glslangValidator` (Debian/Ubuntu: `glslang-tools`)
   for the Android build
 - Android SDK build-tools + platform jar + a JDK for APK packaging
+- emsdk, pinned to **4.0.10**, for the browser build (see
+  [docs/validation-web.md](docs/validation-web.md) for why the pin matters)
 - git (for `scripts/fetch-menagerie.sh`)
 
 ## Build & run
@@ -79,9 +87,21 @@ cmake --build build --parallel
     --ref baselines/teleop-host-x86_64.txt
 ```
 
-The host build is the common prefix of both targets — it compiles and links
-the entire portable core, so it is the fastest way to find out whether a
-change to physics, teleop or frame conventions broke anything.
+The host build is the common prefix of all three targets — it compiles and
+links the entire portable core, so it is the fastest way to find out whether
+a change to physics, teleop or frame conventions broke anything.
+
+Browser app (Quest Browser, or desktop Chrome's DevTools WebXR panel):
+
+```
+emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
+cmake --build build-web --parallel --target mxr baseline teleop_replay
+cd build-web && python3 -m http.server 8000
+# on a headset: adb reverse tcp:8000 tcp:8000, then open http://localhost:8000
+```
+
+Build **named targets only, never `all`** — upstream's wasm subdirectory is
+added unconditionally under Emscripten and writes into the source tree.
 
 Headset app:
 
@@ -104,11 +124,13 @@ In the headset: squeeze to clutch the green target marker to your hand,
 trigger to close the gripper, A to reset the scene. Follow
 [docs/validation-android.md](docs/validation-android.md) for the ordered
 bring-up gates (benchmark → XR skeleton → handedness → teleop acceptance →
-soak). Nothing here has ever run on a headset.
+soak). The browser target has the same five gates in
+[docs/validation-web.md](docs/validation-web.md), and more of them are
+green — nothing here has ever run on a headset.
 
 ## Layout
 
-- `src/` — the portable core, shared by the shell and by the host tools:
+- `src/` — the portable core, shared by both shells and by the host tools:
   frame conventions, clutched teleop, DLS IK, the frame loop
   (`sim_scene`), mesh building, rate limiter, logging, error hooks. What
   makes this a real tier is the `mxr_core` CMake target's restricted source
@@ -117,13 +139,14 @@ soak). Nothing here has ever run on a headset.
 - `app/android/` — the OpenXR + Vulkan shell: XR session, Vulkan context,
   `mjvScene` renderer, APK asset loading, GLSL shaders, manifest and
   packaging script
+- `app/web/` — the WebXR + WebGL2 shell: the C ABI (`abi.h`), renderer,
+  GLSL ES shaders, `shell.js`, `index.html`
 - `host/` — host-side IK prototype (convergence + nullspace checks)
 - `bench/` — invariant baseline recorder/checker, teleop replay, `testspeed`
 - `baselines/` — recorded references: the cross-platform invariant, and the
   host teleop-refactor lock
 - `scripts/` — Menagerie scene fetcher (sparse, pinned)
-- `docs/` — the ordered validation gates, numbered so a second target can
-  reuse the numbering
+- `docs/` — per-target validation guides, with shared gate numbering
 
 ## License notes
 

@@ -3,8 +3,9 @@
 Ordered gates for bringing MuJoCoXR up on a Quest-class arm64-v8a headset.
 Run them in order — each later gate assumes the earlier ones hold.
 
-Gate numbers and titles are stable, so "gate 3" means the same thing in
-every conversation and a second target can adopt the same numbering. Every gate line carries exactly one of **PASS** (with
+Gate numbers and titles are identical to
+[validation-web.md](validation-web.md), so "gate 3" means the same thing in
+both conversations. Every gate line carries exactly one of **PASS** (with
 date, machine and the measured number), **UN-RUN** (with `blocked on:`) or
 **N/A** — never blank. A gate as a whole may also be **PARTIAL**, which is
 not a fourth state for a line: it means the gate decomposes, and every
@@ -24,7 +25,8 @@ authorized over adb. All commands run from the repo root.
 ## 1. Engine benchmark + invariant check
 
 **Status: UN-RUN** — `blocked on: a physical arm64 device over adb.`
-The same binary and the same reference pass on host and on device.
+The same binary and the same reference pass on host and on wasm32; see
+[validation-web.md](validation-web.md) gate 1.
 
 Cross-compile the CLI tools:
 
@@ -72,7 +74,8 @@ done
 ```
 
 Expect `invariant_check = PASS`, and read `qpos_linf_diff` against the four
-bands below — those bands are shared policy, not per-target. In particular `1e-6 … 1e-3` reads green and must not
+bands in [validation-web.md](validation-web.md) — those bands are shared
+policy, not per-target. In particular `1e-6 … 1e-3` reads green and must not
 be landed on, and `kQposTol` is never widened.
 
 arm64 is the target most likely to diverge: it has `FMADD` in the base ISA

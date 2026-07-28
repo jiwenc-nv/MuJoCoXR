@@ -180,8 +180,8 @@ if(NOT EMSCRIPTEN)
   target_link_libraries(testspeed PRIVATE mujoco Threads::Threads)
 endif()
 
-# The staged scene teleop_replay loads: ar_scene.xml lives in assets/ and
-# panda.xml in third_party/, and mj_loadXML resolves
+# The staged scene both teleop_replay and the web build load: ar_scene.xml
+# lives in assets/ and panda.xml in third_party/, and mj_loadXML resolves
 # `<include file="panda.xml"/>` and meshdir="assets" relative to the XML, so
 # they have to be co-located. The assets/ subdirectory is PRESERVED, not
 # flattened to basenames like the APK does — the APK gets away with that only
@@ -222,15 +222,105 @@ endif()
 
 # Everything above is the common prefix and builds in EVERY configuration —
 # deliberately not an else-branch, so nobody can turn this into
-# if/elseif/else and quietly make the portable core Android-only.
-if(NOT ANDROID)
-  # A plain `cmake` produces host tools and no app, which is easy to mistake
-  # for a failed configure. Name the cross-build from the one everybody runs
-  # first.
+# if/elseif/else and quietly make the portable core Android-or-web-only.
+if(NOT ANDROID AND NOT EMSCRIPTEN)
+  # A plain `cmake -S . -B build-web` with no emcc exits 0, produces no web
+  # artifacts and says nothing, which is the worst onboarding failure
+  # available. Name both cross-builds from the one everybody runs first.
   message(STATUS "MuJoCoXR: host tools only. For the headset app:")
   message(STATUS "  cmake -S . -B build-android "
                  "-DCMAKE_TOOLCHAIN_FILE=$ENV{ANDROID_NDK}/build/cmake/"
                  "android.toolchain.cmake -DANDROID_ABI=arm64-v8a ...")
+  message(STATUS "  emcmake cmake -S . -B build-web "
+                 "-DCMAKE_BUILD_TYPE=Release   (for the browser)")
+endif()
+
+if(EMSCRIPTEN)
+  # ---- wasm build: CLI tools under node, and the WebXR shell ----
+  #
+  # Build NAMED TARGETS ONLY, never `all`: upstream's add_subdirectory(wasm)
+  # is unconditional under EMSCRIPTEN and points CMAKE_RUNTIME_OUTPUT_DIRECTORY
+  # at ${CMAKE_SOURCE_DIR}/wasm/dist — which, under FetchContent, is a
+  # `wasm/dist` inside THIS repo.
+  set(MXR_WASM_LINK_OPTIONS
+      -fexceptions
+      # emcc defaults the stack to 64 KB. qhull over 396,791 mesh vertices
+      # overruns it, and the result is corruption rather than an error.
+      -sSTACK_SIZE=4MB
+      -sINITIAL_MEMORY=256MB
+      -sALLOW_MEMORY_GROWTH=1)
+
+  function(mxr_wasm_cli target scene)
+    target_link_options(${target} PRIVATE ${MXR_WASM_LINK_OPTIONS}
+      -sEXIT_RUNTIME=1  # so main()'s return code reaches node
+      "SHELL:--preload-file ${MXR_SCENE_DIR}@/franka"
+      # The references travel with the binary, so the gate is one command
+      # with no host-filesystem access and no NODERAWFS.
+      "SHELL:--preload-file ${CMAKE_CURRENT_SOURCE_DIR}/baselines@/baselines")
+    if(NOT EXISTS ${MXR_SCENE_DIR}/${scene})
+      message(FATAL_ERROR
+        "${target} needs the staged scene at ${MXR_SCENE_DIR}/${scene} — run "
+        "scripts/fetch-menagerie.sh and re-run cmake.")
+    endif()
+  endfunction()
+
+  mxr_wasm_cli(baseline scene.xml)
+  mxr_wasm_cli(teleop_replay ar_scene.xml)
+
+  # ---- the WebXR app ----
+  # GLSL travels as a C string literal rather than a fetch: the shaders must
+  # arrive with the wasm module they were compiled against, and a second
+  # network request is a second thing that can 404 in a headset browser.
+  # (The Android side compiles the same sources to SPIR-V instead; neither
+  # target ships GLSL as a separate file.)
+  set(MXR_WEB_SHADER_INCS)
+  foreach(shader scene.vert scene.frag)
+    set(shader_out ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.inc)
+    add_custom_command(
+      OUTPUT ${shader_out}
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              ${CMAKE_CURRENT_BINARY_DIR}/shaders
+      COMMAND ${CMAKE_COMMAND}
+              -DIN=${CMAKE_CURRENT_SOURCE_DIR}/app/web/shaders/${shader}
+              -DOUT=${shader_out}
+              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_shader.cmake
+      DEPENDS app/web/shaders/${shader} cmake/embed_shader.cmake)
+    list(APPEND MXR_WEB_SHADER_INCS ${shader_out})
+  endforeach()
+  add_custom_target(mxr_web_shaders DEPENDS ${MXR_WEB_SHADER_INCS})
+
+  add_executable(mxr app/web/main.cc app/web/scene_renderer.cc)
+  add_dependencies(mxr mxr_web_shaders)
+  target_include_directories(mxr PRIVATE app/web ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(mxr PRIVATE ${MXR_MUJOCO} mxr_core)
+  target_link_options(mxr PRIVATE ${MXR_WASM_LINK_OPTIONS}
+    # No EXIT_RUNTIME: main() returns immediately and the browser owns the
+    # loop, so the runtime has to stay alive for the ABI calls.
+    -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createMxr
+    -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
+    # cwrap builds the call thunks; GL is how shell.js registers WebXR's
+    # opaque framebuffer into Emscripten's object table. Exports are declared
+    # by EMSCRIPTEN_KEEPALIVE at each definition, never listed here.
+    "SHELL:-sEXPORTED_RUNTIME_METHODS=['cwrap','GL','HEAPF32','HEAP32']"
+    "SHELL:--preload-file ${MXR_SCENE_DIR}@/franka")
+  set_target_properties(mxr PROPERTIES OUTPUT_NAME mxr SUFFIX ".js")
+
+  # The page and the shell sit beside the generated mxr.js so the whole web
+  # target is one directory to serve. A POST_BUILD copy would be wrong here:
+  # editing shell.js does not relink mxr, so the copy would never run and you
+  # would debug a stale shell.
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/index.html
+           ${CMAKE_CURRENT_BINARY_DIR}/shell.js
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/app/web/index.html
+            ${CMAKE_CURRENT_SOURCE_DIR}/app/web/shell.js
+            ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS app/web/index.html app/web/shell.js)
+  add_custom_target(mxr_web_page
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/index.html
+            ${CMAKE_CURRENT_BINARY_DIR}/shell.js)
+  add_dependencies(mxr mxr_web_page)
 endif()
 
 if(ANDROID)

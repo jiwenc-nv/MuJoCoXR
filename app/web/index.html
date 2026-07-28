@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- Entry point for the WebXR target. Deliberately minimal: the status line
+     is the whole UI, because outside a session it is the only place a
+     headset browser shows you why nothing happened. INSIDE an immersive
+     session the DOM is not composited, so both it and `frame error:` are
+     invisible until you exit — in-session diagnosis is chrome://inspect.
+     No COOP/COEP headers are required — threads are off, so there is no
+     SharedArrayBuffer. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MuJoCoXR</title>
+<style>
+  body { margin: 0; background: #111; color: #eee;
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { padding: 1.5rem; max-width: 40rem; }
+  #mxr-canvas { display: block; width: 100%; height: 50vh; background: #000; }
+  #status { white-space: pre-wrap; }
+  button { font: inherit; padding: 0.5rem 1rem; margin: 0.5rem 0; }
+</style>
+</head>
+<body>
+<!-- The id is a hardcoded contract with app/web/main.cc's mxr_init, which
+     passes "#mxr-canvas" to emscripten_webgl_create_context. Renaming it
+     here breaks startup with "WebGL2 context creation failed".
+     The canvas stays black on purpose: every frame is rendered into the
+     XRWebGLLayer framebuffer, never into this one. Black is not a failure. -->
+<canvas id="mxr-canvas"></canvas>
+<main>
+  <h1>MuJoCoXR</h1>
+  <button id="enter" disabled>Enter AR</button>
+  <p id="status">starting…</p>
+  <p>Squeeze to clutch the target marker to your hand, trigger to close the
+     gripper, A to reset to the home pose.</p>
+</main>
+<script type="module" src="./shell.js"></script>
+</body>
+</html>

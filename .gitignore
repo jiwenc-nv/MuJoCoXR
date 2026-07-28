@@ -2,3 +2,10 @@ build*/
 third_party/
 *.apk
 *.apk.idsig
+# Created at GENERATE time by upstream's wasm/CMakeLists.txt, which does
+# set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/wasm/dist") — and
+# under FetchContent, CMAKE_SOURCE_DIR is this repo. It stays empty as long
+# as you build named targets and never `all`; we do not patch upstream.
+# Anchored: an unanchored `wasm/` matches at any depth, and the one thing we
+# want ignored is exactly the repo-root directory upstream creates.
+/wasm/
