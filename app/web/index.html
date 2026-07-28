@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<!-- Entry point for the WebXR target. Deliberately minimal: the status line
-     is the whole UI, because outside a session it is the only place a
-     headset browser shows you why nothing happened. INSIDE an immersive
-     session the DOM is not composited, so both it and `frame error:` are
-     invisible until you exit — in-session diagnosis is chrome://inspect.
+<!-- Entry point for the WebXR target. Deliberately minimal: a scene picker,
+     one Enter button and a status line, and the status line is the whole
+     diagnostic surface — outside a session it is the only place a headset
+     browser shows you why nothing happened. INSIDE an immersive session the
+     DOM is not composited, so both it and `frame error:` are invisible until
+     you exit — in-session diagnosis is chrome://inspect.
      No COOP/COEP headers are required — threads are off, so there is no
      SharedArrayBuffer. -->
 <html lang="en">
@@ -17,7 +18,14 @@
   main { padding: 1.5rem; max-width: 40rem; }
   #mxr-canvas { display: block; width: 100%; height: 50vh; background: #000; }
   #status { white-space: pre-wrap; }
-  button { font: inherit; padding: 0.5rem 1rem; margin: 0.5rem 0; }
+  button, #menu a { font: inherit; padding: 0.5rem 1rem; margin: 0.5rem 0; }
+  #menu { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  /* Links, not buttons — see shell.js's buildMenu. aria-current="page" is the
+     state of a navigation target; aria-pressed would announce "pressed" for a
+     control that unloads the document. */
+  #menu a { background: #222; border: 1px solid #555; border-radius: 3px;
+            color: #eee; text-decoration: none; }
+  #menu a[aria-current="page"] { outline: 2px solid #6cf; }
 </style>
 </head>
 <body>
@@ -29,10 +37,22 @@
 <canvas id="mxr-canvas"></canvas>
 <main>
   <h1>MuJoCoXR</h1>
+  <!-- THE SCENE MENU IS EMPTY ON PURPOSE. shell.js fills it with one link
+       per entry in src/robot_spec.c's scene table, queried through the ABI,
+       so this file contains no robot name, id or count. A hand-written list
+       here would be a second place to add a robot and the only one with no
+       error when you forget: the scene would exist in C and be unreachable
+       from the page. Picking one navigates to ?scene=<id>. -->
+  <div id="menu"></div>
   <button id="enter" disabled>Enter AR</button>
   <p id="status">starting…</p>
+  <!-- B differs per platform BY DESIGN and this is the only place either
+       binding is written for a human. On the web B ends the session, because
+       switching robots here is a page navigation the menu above already
+       offers. On Android there is no menu and no URL, so B cycles scenes and
+       exiting is the system gesture. See app/android/xr_shell.h. -->
   <p>Squeeze to clutch the target marker to your hand, trigger to close the
-     gripper, A to reset to the home pose.</p>
+     gripper, A to reset to the home pose, B to exit the session.</p>
 </main>
 <script type="module" src="./shell.js"></script>
 </body>

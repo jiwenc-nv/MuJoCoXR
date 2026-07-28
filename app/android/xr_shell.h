@@ -1,8 +1,9 @@
 // Raw OpenXR shell for the MuJoCoXR NativeActivity app
 // (raw OpenXR, no game engine): Khronos loader,
 // XR_KHR_android_create_instance, XR_KHR_vulkan_enable2 handshake,
-// LOCAL_FLOOR reference space (fallback STAGE -> LOCAL), one action set on
-// the right Touch controller (grip pose, trigger, squeeze, A; B unbound).
+// LOCAL_FLOOR reference space (fallback STAGE -> LOCAL), one action set bound
+// on BOTH hands across every supported interaction profile (grip pose,
+// trigger, squeeze, A/X, B/Y).
 
 #ifndef MUJOCOXR_APP_ANDROID_XR_SHELL_H_
 #define MUJOCOXR_APP_ANDROID_XR_SHELL_H_
@@ -56,6 +57,14 @@ class XrShell {
   // InputState that does not come from xrSyncActions.
   void PollEvents(bool* exit_render_loop, InputState* input);
 
+  // B/Y as a RAW LEVEL, updated by SyncInput. Deliberately NOT a field of
+  // InputState: InputState is the shell->core struct and the core does
+  // nothing with B — switching scenes destroys and rebuilds SimScene, so it
+  // cannot be a method on it. The WebXR shell keeps its B binding local for
+  // the same reason (app/web/shell.js reads buttons[5] and ends the session).
+  // The caller owns the edge; see the b_prev latch in android_main.
+  bool b_down() const { return b_down_; }
+
   bool session_running() const { return session_running_; }
   XrInstance instance() const { return instance_; }
   XrSession session() const { return session_; }
@@ -104,6 +113,8 @@ class XrShell {
   XrAction trigger_action_ = XR_NULL_HANDLE;
   XrAction squeeze_action_ = XR_NULL_HANDLE;
   XrAction a_action_ = XR_NULL_HANDLE;
+  XrAction b_action_ = XR_NULL_HANDLE;
+  bool b_down_ = false;
   // Both hands bound; per frame the first hand with a valid grip pose wins
   // (index 0 = right, 1 = left).
   XrPath hand_paths_[2] = {XR_NULL_PATH, XR_NULL_PATH};

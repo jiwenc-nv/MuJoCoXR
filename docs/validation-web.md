@@ -20,7 +20,7 @@ decomposition is the same as blank.
 
 | You want to | Use |
 |---|---|
-| Change physics, teleop or frame conventions and know within seconds whether you broke something | Host: `cmake -S . -B build && ./build/teleop_replay build/franka/ar_scene.xml --ref baselines/teleop-host-x86_64.txt` |
+| Change physics, teleop or frame conventions and know within seconds whether you broke something | Host: `cmake -S . -B build && ./build/teleop_replay build/franka/ar_scene.xml --ref baselines/teleop-franka-host-x86_64.txt` (and the `so101` twin) |
 | Check the engine is deterministic on a new architecture | `baseline` on that target vs `baselines/host-x86_64.txt` |
 | See the scene, iterate on the renderer or the shell in seconds | Web (this document) |
 | Measure real motion-to-photon latency, or ship | Android ([validation-android.md](validation-android.md)) |
@@ -127,10 +127,12 @@ until a step below exonerates the build:
    re-record `host-x86_64.txt` — **as its own explicitly argued commit**,
    never quietly inside another change.
 
-`bench/excitation.h` is frozen. Its `255.0*(1.0-close)` looks identical to
-`teleop.cc`'s gripper mapping, but the two expressions round differently, so
-a well-meaning "unify the gripper mapping" refactor silently invalidates the
-recorded reference. The file says so; believe it.
+`bench/excitation.h` is frozen. Its `255.0*(1.0-close)` no longer appears in
+`teleop.cc` at all — that mapping now reads its endpoints from the robot
+table and reduces to this expression only for the Franka — but the two still
+round differently (`float` vs `double` operand), so a well-meaning "unify the
+gripper mapping" refactor silently invalidates the recorded reference. The
+file says so at length; believe it.
 
 **Related measurements, same run:**
 
@@ -195,10 +197,33 @@ dt to 0, so the existing stalled-clock watchdog names it on every shell:
 [mujocoxr E] dt has been 0 for 11 frames running — clock source '…' is not advancing
 ```
 
+**Scene selection, testable in a plain browser tab with no XR device:**
+
+- Opening the page with **no** `?scene=` shows one link per entry in
+  `src/robot_spec.c`'s scene table and the status `pick a robot above`, and
+  **compiles nothing** — `Enter AR` stays disabled. The links are built
+  from `mxr_menu_count/id/label`, so `app/web/index.html` contains no robot
+  name at all and a scene cannot exist in C while being unreachable here.
+- Clicking a robot navigates to `?scene=<id>` and **reloads**. The reload is
+  the teardown: it reclaims the GL context, the wasm heap, the compiled model
+  and `SimScene`'s latched clock in one step, which is why there is no
+  `mxr_unload_model` and no `Destroy()` in `app/web/scene_renderer.h`.
+- `?scene=so101` loads directly. `?scene=nonsense` reports
+  `unknown scene "nonsense" — available: franka, so101` rather than failing
+  inside `mj_loadXML`; the path is built from the table's copy of the id, not
+  from the query string.
+- The chosen scene's link is outlined (`aria-current="page"` — they are anchors,
+  not buttons; see `shell.js`'s `buildMenu`).
+
 **UN-RUN, requiring a real session** (desktop Chrome → DevTools → ⋮ → More
 tools → **WebXR**, pick a device, then Enter AR):
 
 - `immersive-ar` supported and entered.
+- **B (`buttons[5]`) ends the session** and returns to the page, where the
+  menu is live again. B is bound entirely in `app/web/shell.js` and crosses
+  no ABI: ending a session is an `XRSession` operation, and the core has
+  nothing to do with it. (The Android shell binds the same button to cycle
+  scenes in-process, because it has no page to return to.)
 - The granted reference space is `local-floor`. The shell requests it with
   **no fallback list** and hard-fails on throw, because WebXR's fallback is
   `local-floor → local` and `local` sits at head height at session start —
@@ -357,7 +382,7 @@ and frame-period p99 stable. Thermal behaviour is device-only.
 | Physics lurches after re-entering the session | The clutch stayed latched or the accumulator kept the gap | `mxr_end_session` should fire on the session `end` event |
 | `recenter_edge asserted 4 frames running` | The shell is wiring a level where an edge is required | `shell.js`'s `recenterEdge` must be cleared each frame |
 | Entire scene ~1.6 m too high | A non-floor reference space was granted | Should be impossible — entry hard-fails; see gate 3 |
-| Gripper never closes | The model's `actuator_ctrlrange` is not (0, 255) | `gripper ctrlrange is (…)` at startup |
+| Gripper never closes | The robot's tabulated `gripper_closed`/`gripper_open` are outside the model's `actuator_ctrlrange` | `gripper endpoints (closed …, open …) fall outside '…' ctrlrange` at startup |
 | Translucent marker washed out over passthrough | The premultiplied-alpha question, unresolved on **both** targets | See the alpha row in validation-android.md gate 3 — fix both together |
 | The page loads a stale `shell.js` | Browser cache; the build copies it correctly | Hard-reload |
 

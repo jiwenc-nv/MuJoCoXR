@@ -1,4 +1,4 @@
-// Clutched DLS teleop of the Franka arm:
+// Clutched DLS teleop of whichever arm the scene contains:
 // squeeze-hold latches offsets — p_target = p_t0 + s*(p_c - p_c0),
 // q_target = (q_c (x) q_c0^-1) (x) q_t0 — with controller poses already
 // mapped into MuJoCo world, so engage is zero-jump by construction. Exact
@@ -28,10 +28,17 @@
 // magnitude, or chase the 3e-08 by widening grip_quat to double: it is not
 // in the angle.
 //
-// Target rate-limited; DLS + nullspace home bias every frame; gripper
-// ctrl[7] = 255*(1 - trigger) (inverted: 255 = open); A = home reset;
-// B stays unbound. Auto-disengage on recenter (reviewer advisory) and on
-// lost grip tracking.
+// Target rate-limited; DLS + nullspace home bias every frame; the jaw is a
+// direct affine map from the trigger onto the robot's tabulated open/closed
+// endpoints; A = home reset. B never reaches the core — both shells bind it
+// themselves (web ends the session, Android cycles the scene), because
+// switching robots destroys and rebuilds this object and so cannot be a
+// method on it. Auto-disengage on recenter (reviewer advisory) and on lost
+// grip tracking.
+//
+// EVERY per-robot number is read through ik_.spec, which points at the
+// src/robot_spec.c row the model was probed into. Nothing in this class is
+// tuned, and nothing here is allowed to test which robot it is driving.
 
 #ifndef MUJOCOXR_SRC_TELEOP_H_
 #define MUJOCOXR_SRC_TELEOP_H_
@@ -59,7 +66,6 @@ class Teleop {
 
  private:
   IkDls ik_;
-  int gripper_act_ = -1;
   bool engaged_ = false;
   bool a_down_prev_ = false;   // core-owned A edge
   int64_t recenter_run_ = 0;   // consecutive frames recenter_edge was true
@@ -67,12 +73,11 @@ class Teleop {
   mjtNum p_c0_[3] = {0}, q_c0_[4] = {1, 0, 0, 0};  // controller at engage
   mjtNum p_t0_[3] = {0}, q_t0_[4] = {1, 0, 0, 0};  // target at engage
   mjtNum target_pos_[3] = {0}, target_quat_[4] = {1, 0, 0, 0};
-  // Control-display ratio: an operator human-factors parameter, not a safety
-  // limit like kMaxLinRate/kEngageThreshold, which is why it stays a
-  // per-instance member rather than becoming a file-scope constant.
-  // TODO: expose as Teleop::SetScale(mjtNum) once a caller needs it; the
-  // clutch exists precisely so s != 1 is usable, and nothing sets it today.
-  mjtNum scale_ = 1.0;  // clutch motion scale s
+  // NO MEMBER OF THIS CLASS CARRIES TUNING, and none should. Every tuned
+  // number is a column of MxrRobot, read through ik_.spec. In particular the
+  // clutch motion scale is MxrRobot::clutch_scale and must not come back here
+  // behind a setter: it is a property of the arm's reach, not of a session,
+  // so nothing should be able to change it at runtime.
 };
 
 #endif  // MUJOCOXR_SRC_TELEOP_H_

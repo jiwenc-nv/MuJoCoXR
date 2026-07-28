@@ -15,6 +15,7 @@ import createMxr from './mxr.js';
 
 const statusEl = document.getElementById('status');
 const buttonEl = document.getElementById('enter');
+const menuEl = document.getElementById('menu');
 
 // Shell lines are tagged '[mujocoxr]'; the C core's mxr_log.h emits
 // '[mujocoxr I|W|E]'. One chrome://inspect filter on "mujocoxr" catches
@@ -48,6 +49,11 @@ let loggedFrameError = false;
 let sessionLogged = false;
 let clockIsRaf = false;
 let xrFbName = 0;
+// B is a LEVEL from the gamepad; the edge is derived here. Without it, a
+// single press spans several frames at 72-90 Hz and would call session.end()
+// once per frame — the first ends the session and the rest run against a
+// dead one.
+let bDownPrev = false;
 
 function resetSessionState() {
   recenterEdge = false;
@@ -56,6 +62,9 @@ function resetSessionState() {
   loggedFrameError = false;
   sessionLogged = false;
   clockIsRaf = false;
+  // True at reset, not false: a session entered with B already held must not
+  // fire an edge on its own first frame and end itself immediately.
+  bDownPrev = true;
 }
 
 // Emscripten's GL layer keys objects by integer. WebXR hands us an OPAQUE
@@ -100,7 +109,10 @@ function bindAbi(m) {
   const c = (name, ret, args) => m.cwrap(name, ret, args);
   const a = {
     init: c('mxr_init', 'number', []),
-    loadModel: c('mxr_load_model', 'number', []),
+    menuCount: c('mxr_menu_count', 'number', []),
+    menuId: c('mxr_menu_id', 'string', ['number']),
+    menuLabel: c('mxr_menu_label', 'string', ['number']),
+    loadModel: c('mxr_load_model', 'number', ['string']),
     lastError: c('mxr_last_error', 'string', []),
     setClockSource: c('mxr_set_clock_source', null, ['string']),
     endSession: c('mxr_end_session', null, []),
@@ -146,7 +158,7 @@ let layout = null;
 // silently kills the loop after one frame, so nothing here may assume a
 // button exists.
 function writeInputBlock(frame, input) {
-  const out = { valid: false, aDown: false };
+  const out = { valid: false, aDown: false, bDown: false };
   input[IN_TRIGGER] = 0;
   input[IN_SQUEEZE] = 0;
   for (const src of session.inputSources) {
@@ -189,6 +201,16 @@ function writeInputBlock(frame, input) {
         }
         if (gp.buttons.length > 4) {
           out.aDown = gp.buttons[4].pressed;
+        }
+        // B ends the session, and it is bound HERE rather than crossing the
+        // ABI as an InputState field, because there is nothing for the core
+        // to do with it: ending a session is an XRSession operation. The
+        // Android shell binds the same button to cycle scenes, which it can
+        // only do because it owns its model's lifetime; this page switches
+        // scenes by reloading with a different ?scene=, so exiting is the
+        // useful thing B can mean here.
+        if (gp.buttons.length > 5) {
+          out.bDown = gp.buttons[5].pressed;
         }
       }
     }
@@ -295,6 +317,16 @@ function onFrame(t, frame) {
     for (let i = 0; i < nwrite; ++i) {
       abi.drawView(i);
     }
+
+    // After the frame is drawn, so the last frame of the session is a
+    // complete one. session.end() is async and its 'end' handler does the
+    // teardown; requestAnimationFrame was already re-armed at the top of this
+    // function, and the UA stops delivering callbacks once the session ends.
+    if (ctl.bDown && !bDownPrev) {
+      status('exiting session (B)');
+      session.end().catch((e) => console.warn('[mujocoxr] end failed', e));
+    }
+    bDownPrev = ctl.bDown;
   } catch (e) {
     // Once per session. A persistent frame error at 72-90 Hz floods the one
     // console you are trying to read it in, and the status line is not
@@ -360,8 +392,37 @@ async function enterXr() {
   refSpace.addEventListener('reset', () => { recenterEdge = true; });
 
   buttonEl.disabled = true;
-  status('in session — squeeze to clutch, trigger for the gripper, A to reset');
+  status('in session — squeeze to clutch, trigger for the gripper, ' +
+         'A to reset, B to exit');
   session.requestAnimationFrame(onFrame);
+}
+
+// One link per scene in src/robot_spec.c, queried rather than written down.
+//
+// Switching is a NAVIGATION, not a call: loading ?scene= tears down the GL
+// context, the wasm heap, the compiled model and SimScene's latched clock in
+// one step that the browser already implements correctly. The alternative —
+// an unload/reload path in C — would be the one teardown nobody could test
+// without a headset, and the clock state is the part that would be silently
+// missed.
+//
+// THEY ARE ANCHORS, NOT BUTTONS, and the reason is that first sentence. These
+// controls navigate, so aria-pressed would announce a toggle state for
+// something that unloads the document; aria-current="page" is the state of a
+// navigation target. Using a real href also deletes the click handler and
+// hands back Enter, middle-click and open-in-new-tab for free. index.html
+// styles them to look like the buttons they are not.
+function buildMenu(current) {
+  for (let i = 0; i < abi.menuCount(); ++i) {
+    const id = abi.menuId(i);
+    const a = document.createElement('a');
+    a.textContent = abi.menuLabel(i);
+    a.href = '?scene=' + encodeURIComponent(id);
+    if (id === current) {
+      a.setAttribute('aria-current', 'page');
+    }
+    menuEl.appendChild(a);
+  }
 }
 
 async function main() {
@@ -389,13 +450,15 @@ async function main() {
     await mod.GL.currentContext.GLctx.makeXRCompatible();
   }
 
-  status('compiling the Franka scene (67 meshes)…');
-  if (abi.loadModel() !== 0) {
-    status('model load failed: ' + abi.lastError());
-    return;
-  }
-  layout = queryLayout();
+  // The menu is built before anything is compiled, so a page opened with no
+  // ?scene= is a working picker rather than a robot someone did not choose.
+  const wanted = new URL(window.location.href).searchParams.get('scene');
+  buildMenu(wanted);
 
+  // AHEAD OF THE ?scene= BRANCHES, because these two are properties of the
+  // PAGE and not of the chosen robot. Behind them, a user on http:// had to
+  // pick a robot and sit through a compile before being told the page can
+  // never enter AR — the one diagnosis that is already true at load.
   // navigator.xr is undefined on an INSECURE ORIGIN as well as on a browser
   // with no WebXR, and plain http:// from a dev box to a headset is the most
   // likely way this page is first opened. Reporting "no WebXR" there sends
@@ -410,6 +473,22 @@ async function main() {
     status('this browser has no WebXR; nothing to enter');
     return;
   }
+
+  if (!wanted) {
+    status('pick a robot above');
+    return;
+  }
+
+  status('compiling ' + wanted + '…');
+  // No id validation here: mxr_load_model resolves ?scene= through
+  // mxr_scene_by_id itself and fails by name. A second copy in JS existed
+  // only so the message could list the valid ids — which the menu directly
+  // above the status line already does, in the same table order.
+  if (abi.loadModel(wanted) !== 0) {
+    status('model load failed: ' + abi.lastError());
+    return;
+  }
+  layout = queryLayout();
   const ok = await navigator.xr.isSessionSupported('immersive-ar');
   if (!ok) {
     status('immersive-ar is not supported here (try a headset browser, or ' +

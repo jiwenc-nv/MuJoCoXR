@@ -8,6 +8,26 @@
 
 namespace {
 
+// SHARED ACROSS ROBOTS, not a src/robot_spec.c column, and that survived a
+// serious attempt to make it one. A 0.30 m/s cap for the SO101 was proposed,
+// measured, and withdrawn by the persona who proposed it: against a realistic
+// operator sweep (0.5 Hz, +-0.10 m, peak 0.31 m/s) it makes mean lag 2.2x
+// WORSE — 4.9 mm against 2.2 mm at 1.5 — because a rate limiter can only ADD
+// lag to a signal already below the cap. It helps only on discontinuous jumps,
+// and the clutch latch already removes those by construction.
+//
+// The finding that motivated the cap is real and is NOT addressed here:
+// torque saturation runs at 39-43 % of frames on the SO101. But it is at
+// 39-43 % at EVERY cap including 0.20, because saturation is a servo and
+// gravity property, not a command-rate one. The cap was the wrong instrument;
+// MxrRobot::clutch_scale is the one that actually moved this arm's numbers.
+//
+// These two are also duplicated in bench/teleop_replay.cc, deliberately, and
+// its SlewWatch only checks an UPPER bound. So a per-robot rate would have to
+// be a TIGHTENING, which that gate passes vacuously. TRIGGER, if a human runs
+// the SO101 and reports lag: max_lin_rate becomes a table column AND
+// bench/teleop_replay.cc grows a second bound. Do not add one without the
+// other.
 constexpr mjtNum kMaxLinRate = 1.5;   // m/s target rate limit
 constexpr mjtNum kMaxAngRate = 3.0;   // rad/s target rate limit
 constexpr float kEngageThreshold = 0.8f;   // squeeze hysteresis
@@ -17,25 +37,42 @@ constexpr double kPi = 3.14159265358979323846;
 }  // namespace
 
 bool Teleop::Init(const mjModel* m, const mjData* d) {
-  if (ik_dls_init(&ik_, m) != 0) {
-    LOGE("ik_dls_init failed");
+  // Every member back to its default initialiser, in one statement that
+  // cannot drift from the member list. Init is now a RE-init: the Android
+  // shell destroys and rebuilds the whole scene to switch robots, so this
+  // object is initialised over a used one. The three members Init used to
+  // write left engaged_, a_down_prev_, recenter_run_, frame_ and the two
+  // latched engage poses from the PREVIOUS robot — a scene switch made
+  // mid-clutch would have resumed engaged over a stale p_c0_.
+  *this = Teleop{};
+
+  const char* why = "(no reason reported)";
+  if (ik_dls_init(&ik_, m, &why) != 0) {
+    // Log `why`, never just the failure: a false return leaves
+    // SimScene::teleop_ready_ false, and a not-ready SimScene still renders.
+    // The symptom is a robot that draws perfectly and never moves.
+    LOGE("ik_dls_init failed: %s", why);
     return false;
   }
-  gripper_act_ = mj_name2id(m, mjOBJ_ACTUATOR, "actuator8");
-  if (gripper_act_ < 0 && m->nu > IK_NARM) {
-    gripper_act_ = IK_NARM;  // 8th actuator by position
-  }
-  // The 255 below is a per-model remap (panda.xml:275 says so in its own
-  // comment). Assert it rather than deriving it: actuator_ctrlrange supplies
-  // the scale but not the polarity, and Menagerie's Robotiq 2F-85 is also
-  // 0..255 with 0 = OPEN. Without this the failure is silent — MuJoCo clamps
-  // and the gripper simply never closes.
-  if (gripper_act_ >= 0) {
-    const mjtNum* r = m->actuator_ctrlrange + 2*gripper_act_;
-    if (r[0] != 0.0 || r[1] != 255.0) {
-      LOGW("gripper ctrlrange is (%g, %g), not (0, 255): the 255*(1-trigger) "
-           "mapping below is wrong for this model", r[0], r[1]);
-    }
+  LOGI("teleop: robot '%s', %d arm joints, w_rot=%g clutch_scale=%g",
+       ik_.spec->tcp_body, ik_.narm, ik_.spec->w_rot, ik_.spec->clutch_scale);
+
+  // The jaw endpoints are TABULATED (src/robot_spec.c), not derived from
+  // actuator_ctrlrange: ctrlrange supplies the scale but not the polarity,
+  // and both shipped robots are "low = closed" only by coincidence —
+  // Menagerie's Robotiq 2F-85 is 0..255 with 0 = OPEN. Check the tabulated
+  // endpoints still lie inside the model's range rather than following it, so
+  // a Menagerie bump becomes a warning instead of a silent re-scaling. Without
+  // this the failure is silent: MuJoCo clamps and the jaw stops at the wrong
+  // place, or never closes at all.
+  const mjtNum* r = m->actuator_ctrlrange + 2*ik_.gripper_act;
+  if (m->actuator_ctrllimited[ik_.gripper_act] &&
+      (ik_.spec->gripper_closed < r[0] || ik_.spec->gripper_closed > r[1] ||
+       ik_.spec->gripper_open < r[0] || ik_.spec->gripper_open > r[1])) {
+    LOGW("gripper endpoints (closed %g, open %g) fall outside '%s' ctrlrange "
+         "(%g, %g): src/robot_spec.c disagrees with this model",
+         ik_.spec->gripper_closed, ik_.spec->gripper_open,
+         ik_.spec->gripper_act, r[0], r[1]);
   }
   ik_dls_tcp(&ik_, d, target_pos_, target_quat_);
   return true;
@@ -76,14 +113,24 @@ void Teleop::Update(const mjModel* m, mjData* d, const InputState& input,
     recenter_run_ = 0;
   }
 
-  // Gripper is direct: inverted range, 255 = open per the home keyframe.
-  // bench/excitation.h:27 carries a line that looks identical to the one
-  // below and must NOT be unified with it — `t` here is float and `close`
-  // there is double, so the two round differently, and the recorded
-  // baseline was taken through that one. The warning lives there.
-  if (gripper_act_ >= 0) {
+  // Gripper is direct: trigger 0 -> open, 1 -> closed, affine between, with
+  // both endpoints from the robot's table row. Written as
+  // `closed + span*(1 - t)` rather than the algebraically equal
+  // `open + t*(closed - open)` for a bitwise reason, not a stylistic one: the
+  // former reduces to the Franka's original `255.0*(1.0 - t)` exactly (span
+  // is 255.0, closed is +0.0), so the golden trace is unmoved. The latter
+  // rounds differently and would have forced a re-record.
+  //
+  // bench/excitation.h carries `255.0*(1.0 - close)`, which is what the line
+  // below reduces to for the Franka's (0, 255) endpoints, and it must NOT be
+  // unified with it — `t` here is float and `close` there is double, so the
+  // two round differently, and the recorded baseline was taken through that
+  // one. The full warning lives there.
+  {
     float t = input.trigger < 0 ? 0 : (input.trigger > 1 ? 1 : input.trigger);
-    d->ctrl[gripper_act_] = 255.0*(1.0 - t);
+    const mjtNum closed = ik_.spec->gripper_closed;
+    d->ctrl[ik_.gripper_act] =
+        closed + (ik_.spec->gripper_open - closed)*(1.0 - t);
   }
 
   if (input.recenter_edge || !input.grip_valid) {
@@ -114,8 +161,29 @@ void Teleop::Update(const mjModel* m, mjData* d, const InputState& input,
     if (engaged_) {
       mjtNum goal_pos[3], q_c0_inv[4], q_delta[4], goal_quat[4];
       for (int i = 0; i < 3; ++i) {
-        goal_pos[i] = p_t0_[i] + scale_*(p_c[i] - p_c0_[i]);
+        goal_pos[i] = p_t0_[i] + ik_.spec->clutch_scale*(p_c[i] - p_c0_[i]);
       }
+      // THE ORIENTATION IS A DELTA, AND IT MUST STAY ONE. Four parts, in the
+      // order an editor will meet them:
+      //
+      // 1. WHAT IS TRUE. q_delta is the controller's rotation SINCE ENGAGE,
+      //    and it is applied to q_t0_ — the tool's own orientation at engage.
+      //    The absolute orientation of the tool frame never enters.
+      // 2. WHY THAT MATTERS HERE AND NOWHERE ELSE. The two shipped robots do
+      //    not agree on what the tool frame is: measured at their homes, the
+      //    Franka's `hand` frame and the SO101's `gripper` frame are 135.85
+      //    deg apart, and the SO101's own authored tool site is a further
+      //    90.0000 deg about +y from the body frame used here. Neither
+      //    divergence is corrected anywhere in this tree.
+      // 3. WHAT BREAKS IT. Any rewrite that maps the controller orientation
+      //    ONTO the tool instead of composing a delta with it — "point the
+      //    gripper where the hand points", a fixed q_offset per robot, or
+      //    initialising q_t0_ from anything but ik_dls_tcp. Each of those
+      //    turns those two numbers from irrelevant into a per-robot
+      //    correction table that has to be measured on hardware.
+      // 4. HOW YOU WOULD FIND OUT. You would not, on the Franka: it is the
+      //    robot whose frame the constant would be fitted to. The SO101 would
+      //    engage with the jaw rotated ~136 deg and look like a mounting bug.
       mju_negQuat(q_c0_inv, q_c0_);
       mju_mulQuat(q_delta, q_c, q_c0_inv);
       mju_mulQuat(goal_quat, q_delta, q_t0_);
@@ -126,7 +194,7 @@ void Teleop::Update(const mjModel* m, mjData* d, const InputState& input,
   }
 
   // DLS toward the (held or moving) target, every frame.
-  mjtNum dq[IK_NARM];
+  mjtNum dq[MXR_MAX_ARM];
   ik_dls_solve(&ik_, m, d, target_pos_, target_quat_, dq);
   ik_dls_write_ctrl(&ik_, m, d, dq);
 

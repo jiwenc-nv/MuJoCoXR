@@ -395,6 +395,32 @@ void SceneRenderer::Draw(VkCommandBuffer cmd, int eye, const mjvScene* scn) {
   }
 }
 
+// EVERY handle is nulled as it is destroyed, and that is load-bearing rather
+// than hygienic now that a caller exists which calls Destroy() and then
+// Create() again on the same object (app/android/main.cc's scene switch).
+//
+// The failure it prevents: Create() assigns vk_ before it can fail, so a
+// Create() that fails partway — a failed allocation on a device with the new
+// model's geometry already partly uploaded — leaves this object with vk_ set
+// and a MIX of new handles and stale ones from the previous model. The next
+// Destroy() would then pass already-destroyed handles to vkDestroy*, which is
+// undefined behaviour and, on a tile GPU, usually a crash somewhere else
+// entirely. `if (!vk_) return;` alone does not cover it, because vk_ is
+// non-null in exactly that case.
+//
+// Vulkan permits VK_NULL_HANDLE to every vkDestroy*, so the null checks below
+// are redundant with the spec; they are kept because they document which
+// members are handles, and the nulling is what actually matters.
+//
+// THE vkDeviceWaitIdle BELOW IS NOW LOAD-BEARING PER SCENE SWITCH, not once
+// at shutdown, and it is the only thing making the switch safe. Read
+// VkContext::SubmitAndWait (vk_context.cc): DESPITE ITS NAME IT DOES NOT
+// WAIT. It calls vkQueueSubmit with frame_fence_ and returns; the fence is
+// waited on at the *next* BeginFrameCommands. So when B is pressed, the
+// previous frame's command buffer can still be executing, still referencing
+// the vertex/index buffers and descriptor sets freed a few lines down.
+// Deleting this wait would be invisible on the bench and would corrupt or
+// hang the device on the first B-press in a headset.
 void SceneRenderer::Destroy() {
   if (!vk_) {
     return;
@@ -404,37 +430,59 @@ void SceneRenderer::Destroy() {
   for (int i = 0; i < 2; ++i) {
     if (ubo_map_[i]) {
       vkUnmapMemory(dev, ubo_mem_[i]);
+      ubo_map_[i] = nullptr;
     }
     if (ubo_[i]) {
       vkDestroyBuffer(dev, ubo_[i], nullptr);
+      ubo_[i] = VK_NULL_HANDLE;
     }
     if (ubo_mem_[i]) {
       vkFreeMemory(dev, ubo_mem_[i], nullptr);
+      ubo_mem_[i] = VK_NULL_HANDLE;
     }
+    // The descriptor sets are freed with the pool below, but the handles
+    // outlive it and would otherwise be bound by a subsequent Draw().
+    sets_[i] = VK_NULL_HANDLE;
   }
   if (vbuf_) {
     vkDestroyBuffer(dev, vbuf_, nullptr);
+    vbuf_ = VK_NULL_HANDLE;
   }
   if (vmem_) {
     vkFreeMemory(dev, vmem_, nullptr);
+    vmem_ = VK_NULL_HANDLE;
   }
   if (ibuf_) {
     vkDestroyBuffer(dev, ibuf_, nullptr);
+    ibuf_ = VK_NULL_HANDLE;
   }
   if (imem_) {
     vkFreeMemory(dev, imem_, nullptr);
+    imem_ = VK_NULL_HANDLE;
   }
   if (pipeline_) {
     vkDestroyPipeline(dev, pipeline_, nullptr);
+    pipeline_ = VK_NULL_HANDLE;
   }
   if (layout_) {
     vkDestroyPipelineLayout(dev, layout_, nullptr);
+    layout_ = VK_NULL_HANDLE;
   }
   if (pool_) {
     vkDestroyDescriptorPool(dev, pool_, nullptr);
+    pool_ = VK_NULL_HANDLE;
   }
   if (dsl_) {
     vkDestroyDescriptorSetLayout(dev, dsl_, nullptr);
+    dsl_ = VK_NULL_HANDLE;
   }
+  // The geometry index, which is NOT a Vulkan handle and is the second half
+  // of the same bug. Draw() looks up mesh_ranges_[meshid] with only a size
+  // check to protect it, so leaving the previous model's ranges here means a
+  // scene switch whose Create() failed can draw the OLD model's index ranges
+  // out of a destroyed buffer — in bounds, entirely wrong, and no validation
+  // layer would flag it.
+  mesh_ranges_.clear();
+  box_range_ = MeshRange{};
   vk_ = nullptr;
 }

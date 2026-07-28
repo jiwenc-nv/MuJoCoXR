@@ -24,10 +24,29 @@ void AppendAxesGizmo(mjvScene* scn) {
 
 void SimScene::Init(mjModel* m, mjData* d, const char* clock_source) {
   if (scene_valid_) {
-    // mjv_makeScene over a live scene_ would leak it. Refuse, loudly.
-    LOGE("SimScene::Init called twice; ignoring the second call");
+    // Init over a LIVE scene would leak the mjvScene. Refuse, loudly. This is
+    // not a refusal to re-initialise — Destroy() -> Init() is a supported
+    // cycle and the Android B-press swap drives it — only a refusal to skip
+    // the Destroy.
+    LOGE("SimScene::Init called twice without Destroy; ignoring the second "
+         "call");
     return;
   }
+  // Value-initialisation, in one statement that cannot drift from the member
+  // list — the same treatment Teleop::Init gives itself, and for the same
+  // reason now that both are re-init paths. `SimScene{}` on a non-aggregate
+  // zero-initialises and then runs the implicit constructor, so members with
+  // a default initialiser get it and scene_/vis_opt_/cam_, which have none,
+  // get zero rather than being left alone.
+  // Reached only with scene_valid_ == false, i.e. before the first Init or
+  // after a Destroy, so there is nothing live to clobber.
+  //
+  // last_display_s_ is why this is not cosmetic: Destroy() does not clear it,
+  // and it was previously harmless ONLY because app/android/main.cc happens
+  // to call EndSession() before Destroy(). That made a correctness property
+  // of this class depend on the call order of one caller. It no longer does.
+  *this = SimScene{};
+
   model_ = m;
   data_ = d;
   clock_source_ = clock_source;
