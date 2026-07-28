@@ -24,15 +24,23 @@
 
 // A handedness CONVENTION. It cannot be wrong at runtime: it is fixed by the
 // two specs (both XR runtimes are y-up / -z-forward, MuJoCo is REP-103 z-up)
-// and by ar_scene.xml's table. If the axes gizmo is wrong, this is the bug.
+// and by the table in every assets/<id>/ar_scene.xml. If the axes gizmo is
+// wrong, this is the bug.
 static const mjtNum MXR_Q_MJ_FROM_XR[4] = {0.5, 0.5, -0.5, -0.5};  // wxyz
 
 // A WORKSPACE CALIBRATION, and routinely wrong: user standoff plus table
 // height above the floor datum. Robot base ~1 m in front of the user; MJ z=0
-// (robot base = table top, assets/ar_scene.xml) sits 0.73 m above the
-// physical floor so the virtual table stands on it. Both shells log the
-// value at init; see the three-cause checklist in docs/validation-*.md
-// before editing it.
+// sits 0.73 m above the physical floor so the virtual table stands on it.
+//
+// This is ONE calibration shared by every scene, and what makes that legal is
+// that each wrapper puts its table TOP at z=0 with the robot base on it. The
+// tables are otherwise different — the Franka's is `size 0.45 0.4` at
+// `pos 0.15`, the SO101's `0.32 0.30` at `pos 0.10`, each sized to its own
+// reach — but the z=0 plane is the load-bearing part and is common. A new
+// assets/<id>/ar_scene.xml that floats its robot above the table, or thickens
+// it downward from z=0, silently invalidates the 0.73 for that scene only.
+// Both shells log the value at init; see the three-cause checklist in
+// docs/validation-*.md before editing it.
 static const mjtNum MXR_T_MJ_FROM_XR[3] = {-1.0, 0.0, -0.73};
 
 // The one XR-typed struct in the tree, so teleop.cc's "convert before you

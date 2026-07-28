@@ -1,5 +1,5 @@
-# Host reference for the teleop-refactor lock, recorded 2026-07-28 on
-# x86_64 GNU/Linux, gcc 13, CMAKE_BUILD_TYPE=Release, -ffp-contract=off.
+# Host reference for the teleop lock, recorded 2026-07-28 on x86_64
+# GNU/Linux, gcc 13, CMAKE_BUILD_TYPE=Release, -ffp-contract=off.
 #
 # This file locks THIS HOST against itself across refactors. It is NOT a
 # cross-architecture claim — baselines/host-x86_64.txt is the file that
@@ -10,11 +10,37 @@
 # The trace value below was recorded BEFORE any of this landing's
 # commits, by compiling the then-current app/teleop.cc against a
 # throwaway xr_shell.h stub, with app/main.cc:149-183 replicated inline.
-# Every commit since has had to reproduce it.
+# Every commit since has had to reproduce it — including the multi-robot
+# landing, which renamed this file from teleop-host-x86_64.txt, moved the
+# scene to build/franka/, and rewrote nine things in src/ik_dls.{h,c}
+# without moving the hash by one bit.
+#
+# TWO FIELDS HERE ARE NOT BITWISE, and they are the only two compared off
+# this architecture (the trace comparison is skipped, loudly, elsewhere):
+#   opt_*        the scene's solver configuration, so a wrapper XML that
+#                silently loses its <option> block fails as a named line.
+#   pos_med_mm   median target-to-TCP distance over the engaged frames,
+#                compared with a 1.5x + 1 mm tolerance. 23.69 mm here is
+#                not a defect: this robot's clutch_scale is 1.0 against
+#                the SO101's 0.5, so the script commands it twice as far
+#                and twice as fast. See ReachWatch in bench/teleop_replay.cc.
+#
+# REGENERATE WITH:
+#   ./build/teleop_replay build/franka/ar_scene.xml \
+#       > baselines/teleop-franka-host-x86_64.txt
+# then RESTORE THIS COMMENT BLOCK BY HAND — teleop_replay does not emit it,
+# so a plain redirect silently deletes the provenance above. Regenerating is
+# a deliberate, separately argued act: trace_fnv1a is a bitwise lock, so a
+# diff means the dynamics moved, and the question is why rather than how to
+# make it green again.
 # teleop replay: scripted engage/move/release/recenter/reset
 mujoco_version = 3.10.0
 arch = x86_64
 nq = 9
+opt_timestep = 0.002
+opt_integrator = 3 (implicitfast)
+opt_cone = 0 (pyramidal)
+opt_impratio = 1
 nframes = 360
 frame_dt = 0.013888888888888888
 census_vertices = 396815
@@ -52,3 +78,4 @@ trace 324 0 0.66554817645702824 0.19637434929609299 0.55616896772611502 -0.10737
 trace 336 0 0.66554817645702824 0.19637434929609299 0.55616896772611502 -0.10737304765217687 0.75365453800595184 0.64621539036597764 0.05367993326248615 0.15531164198232569 0.64885431270111538 0.12091084078699564 -0.56872758662307621 0.1786764154016684 1.2255967347055048 -0.31549702946691804 3.0673337209009098e-05 3.0232780638304556e-05
 trace 348 0 0.66554817645702824 0.19637434929609299 0.55616896772611502 -0.10737304765217687 0.75365453800595184 0.64621539036597764 0.05367993326248615 0.15432452203361297 0.6491904227232933 0.12362577213561865 -0.56824738850354417 0.17702628318053173 1.2255211078075805 -0.31370751721649465 5.5360528332089229e-06 5.2293859248303672e-06
 trace_fnv1a = 0x5afd777d67fdd243
+pos_med_mm = 23.69

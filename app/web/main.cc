@@ -23,6 +23,7 @@
 #include "mesh_buffers.h"
 #include "mxr_error.h"
 #include "mxr_log.h"
+#include "robot_spec.h"
 #include "scene_renderer.h"
 #include "sim_scene.h"
 
@@ -114,21 +115,65 @@ MXR_ABI_EXPORT int mxr_init(void) {
   return 0;
 }
 
-MXR_ABI_EXPORT int mxr_load_model(void) {
-  char err[1024] = {0};
-  // The staged tree is preloaded into MEMFS with its assets/ subdirectory
-  // intact, so panda.xml's meshdir="assets" resolves natively and the VFS
-  // argument stays null — no loader code at all on this target.
-  g_model = mj_loadXML("/franka/ar_scene.xml", nullptr, err, sizeof(err));
-  if (!g_model) {
-    Fail("mj_loadXML failed: %s", err);
+MXR_ABI_EXPORT int mxr_menu_count(void) { return mxr_scene_count(); }
+
+MXR_ABI_EXPORT const char* mxr_menu_id(int i) {
+  const MxrScene* s = mxr_scene_at(i);
+  return s ? s->id : "";
+}
+
+MXR_ABI_EXPORT const char* mxr_menu_label(int i) {
+  const MxrScene* s = mxr_scene_at(i);
+  return s ? s->label : "";
+}
+
+MXR_ABI_EXPORT int mxr_load_model(const char* scene_id) {
+  if (g_ready) {
+    Fail("mxr_load_model called twice; switching scenes is a page reload");
     return 1;
   }
+  // `scene_id` is the `?scene=` query parameter, i.e. user input. Resolve it
+  // through the table and then build the path from the TABLE's copy of the
+  // id, never from the argument: an unknown id is a named error here rather
+  // than an mj_loadXML failure on an attacker-shaped path.
+  const MxrScene* scene = mxr_scene_by_id(scene_id);
+  if (!scene) {
+    Fail("unknown scene '%s' — not in src/robot_spec.c",
+         scene_id ? scene_id : "(null)");
+    return 1;
+  }
+  char path[128];
+  // <id> IS the mount point: CMakeLists.txt preloads build/<id> at /<id>.
+  // A disagreement between that and the table shows up right here, as a
+  // named path in mxr_last_error().
+  snprintf(path, sizeof(path), "/%s/ar_scene.xml", scene->id);
+
+  char err[1024] = {0};
+  // The staged tree is preloaded into MEMFS with its assets/ subdirectory
+  // intact, so the robot XML's meshdir="assets" resolves natively and the VFS
+  // argument stays null — no loader code at all on this target.
+  g_model = mj_loadXML(path, nullptr, err, sizeof(err));
+  if (!g_model) {
+    Fail("mj_loadXML(%s) failed: %s", path, err);
+    return 1;
+  }
+  LOGI("scene: %s (%s)", scene->label, scene->id);
   LOGI("model loaded: nq=%ld nv=%ld nu=%ld nmesh=%ld",
        static_cast<long>(g_model->nq), static_cast<long>(g_model->nv),
        static_cast<long>(g_model->nu), static_cast<long>(g_model->nmesh));
   g_data = mj_makeData(g_model);
   if (!g_renderer.Create(g_model)) {
+    // Unwind rather than returning with g_model live behind g_ready == false.
+    // The double-load guard at the top keys on g_ready, so this is the one
+    // path that leaves mxr_load_model callable again — and a retry would
+    // overwrite both pointers and leak the model plus its mjData. Nulling
+    // them keeps "not ready" meaning "nothing allocated".
+    if (g_data) {
+      mj_deleteData(g_data);
+      g_data = nullptr;
+    }
+    mj_deleteModel(g_model);
+    g_model = nullptr;
     Fail("renderer creation failed");
     return 1;
   }

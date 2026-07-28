@@ -25,16 +25,24 @@ static inline void excitation_ctrl(double t, const double* home_ctrl, int nu,
   ctrl[3] = home_ctrl[3] + 0.30*sin(2*kPi*0.80*t);  // joint4
   ctrl[5] = home_ctrl[5] + 0.35*sin(2*kPi*1.15*t);  // joint6
   double close = t/1.5 > 1 ? 1 : t/1.5;
-  // DO NOT UNIFY THIS LINE WITH src/teleop.cc's GRIPPER MAPPING. They look
-  // identical and are not: `close` here is double, while teleop.cc's `t` is
-  // float. Both expressions promote to double — that is not the difference.
-  // The OPERAND differs, because teleop.cc's value was rounded to float
-  // first, so `255.0*(1.0 - x)` rounds differently in the two files.
-  // baselines/host-x86_64.txt was recorded through THIS expression, so a
-  // well-meaning "share the gripper mapping" refactor silently invalidates
-  // the reference — the gate stays green against a reference that no longer
-  // describes the code. Re-recording it is a separate, explicitly argued
-  // commit (docs/validation-web.md gate 1 has the procedure).
+  // DO NOT UNIFY THIS LINE WITH src/teleop.cc's GRIPPER MAPPING, and the
+  // temptation is now STRONGER rather than weaker, because that mapping has
+  // been parameterised: teleop.cc no longer spells `255.0*(1.0 - x)` at all.
+  // It reads `closed + (open - closed)*(1.0 - t)` from the robot table, which
+  // reduces to this expression bit-for-bit ONLY for the Franka's endpoints
+  // (0, 255) — which is exactly what makes "these are the same, share them"
+  // look true.
+  //
+  // Two reasons they are not. The OPERAND differs: teleop.cc's `t` is float
+  // and rounded to float before use, while `close` here is double, so the two
+  // round differently even where the algebra agrees. And the ENDPOINTS differ
+  // per robot, while this file is Franka-only by construction (baseline.cc
+  // refuses nu < 8). baselines/host-x86_64.txt was recorded through THIS
+  // expression, so a well-meaning "share the gripper mapping" refactor
+  // silently invalidates the reference — the gate stays green against a
+  // reference that no longer describes the code. Re-recording it is a
+  // separate, explicitly argued commit (docs/validation-web.md gate 1 has the
+  // procedure).
   ctrl[7] = 255.0*(1.0 - close);                    // gripper: 255 = open
 }
 

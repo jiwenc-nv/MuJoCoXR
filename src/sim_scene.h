@@ -34,8 +34,15 @@ class SimScene {
   // the stalled-clock diagnostic — one source per session, never mixed.
   // Returns nothing: mjv_makeScene is `void` and there is no failure to
   // report. Teleop::Init genuinely can fail, and teleop_ready() is that
-  // signal. Not re-entrant — a second call is refused rather than leaking
-  // the live mjvScene.
+  // signal.
+  //
+  // Destroy() -> Init() IS A SUPPORTED CYCLE and app/android/main.cc drives
+  // it once per B-press to switch robots. What is refused is Init over a LIVE
+  // scene — that would leak the mjvScene — so the rule is "one Destroy per
+  // Init", not "one Init per process". Init value-initialises the whole
+  // object, so every member with a default initialiser goes back to it and
+  // the three mjv structs, which have none, go to zero. No state survives
+  // the cycle, and the reset cannot drift from the member list.
   void Init(mjModel* m, mjData* d, const char* clock_source);
 
   // Re-names the latched clock, and logs the new name in the same `clock =`

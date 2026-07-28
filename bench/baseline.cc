@@ -88,8 +88,20 @@ int main(int argc, char** argv) {
     fprintf(stderr, "load failed: %s\n", err);
     return 1;
   }
+  // `nu < 8` is a REFUSAL, not a sanity check, and it is why this binary
+  // stayed single-robot while teleop_replay went multi-robot. bench/
+  // excitation.h drives ctrl[0], ctrl[3], ctrl[5] and ctrl[7] by index — that
+  // is the Panda's joints 1/4/6 plus its gripper, and on the SO101's 6
+  // actuators ctrl[7] is out of range while ctrl[5] is the jaw rather than a
+  // joint. Generalising the excitation is possible but would re-record
+  // baselines/host-x86_64.txt, which is the ONE cross-architecture claim in
+  // the tree; that is a separate, separately argued commit. Until then this
+  // check turns "someone pointed `baseline` at the SO101 scene" into a
+  // refusal rather than a heap overrun and a meaningless reference.
   if (m->nq > kMaxNq || m->nu < 8) {
-    fprintf(stderr, "unexpected model size (nq=%ld nu=%ld)\n",
+    fprintf(stderr,
+            "unexpected model size (nq=%ld nu=%ld); `baseline` is Franka-only "
+            "— see the nu < 8 comment above\n",
             static_cast<long>(m->nq), static_cast<long>(m->nu));
     return 1;
   }

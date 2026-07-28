@@ -6,10 +6,14 @@
 
 #include "mxr_log.h"
 
-mjModel* mxr_load_model_from_assets(AAssetManager* am) {
-  AAssetDir* dir = AAssetManager_openDir(am, "franka");
+mjModel* mxr_load_model_from_assets(AAssetManager* am, const char* scene_id) {
+  AAssetDir* dir = AAssetManager_openDir(am, scene_id);
   if (!dir) {
-    LOGE("assets/franka not found in APK");
+    // Names the directory, because the likely cause is a scene row in
+    // src/robot_spec.c whose id has no matching stage_scene line in
+    // app/android/package-apk.sh — the one pair the build cannot check.
+    LOGE("assets/%s not found in APK (is it staged in package-apk.sh?)",
+         scene_id);
     return nullptr;
   }
 
@@ -20,7 +24,7 @@ mjModel* mxr_load_model_from_assets(AAssetManager* am) {
   const char* name;
   while ((name = AAssetDir_getNextFileName(dir)) != nullptr) {
     char path[256];
-    snprintf(path, sizeof(path), "franka/%s", name);
+    snprintf(path, sizeof(path), "%s/%s", scene_id, name);
     AAsset* asset = AAssetManager_open(am, path, AASSET_MODE_BUFFER);
     if (!asset) {
       LOGE("cannot open asset %s", path);
@@ -37,10 +41,12 @@ mjModel* mxr_load_model_from_assets(AAssetManager* am) {
     AAsset_close(asset);
   }
   AAssetDir_close(dir);
-  LOGI("VFS: %d files registered", nfiles);
+  LOGI("VFS: %d files registered from assets/%s", nfiles, scene_id);
 
   char err[1024] = {0};
-  // AR composition: unmodified panda.xml on a table, no skybox/ground plane.
+  // AR composition: the unmodified Menagerie robot on a table, no skybox and
+  // no ground plane. Unqualified because VFS keys are basenames, so this
+  // resolves within whichever scene directory was just registered.
   mjModel* m = mj_loadXML("ar_scene.xml", vfs, err, sizeof(err));
   if (!m) {
     LOGE("mj_loadXML failed: %s", err);

@@ -35,12 +35,29 @@
 //
 //   startup, once per page:
 //     mxr_init()                  -> 0, or read mxr_last_error()
-//     mxr_load_model()            -> 0, or read mxr_last_error()
+//     mxr_menu_count(), mxr_menu_id(i), mxr_menu_label(i)
+//                                 -- the scene catalogue, for building the
+//                                    picker. Available BEFORE any model
+//                                    exists, which is the point: nothing is
+//                                    compiled until a scene is chosen.
+//
+//   startup, ZERO OR ONE TIMES per page — the shell branches here:
+//     mxr_load_model(scene_id)    -> 0, or read mxr_last_error()
+//                                 -- a page opened with no `?scene=` is a
+//                                    working picker and compiles NOTHING, so
+//                                    everything below this line is reached
+//                                    only once a scene has been chosen.
+//
+//   after a successful mxr_load_model, once per page:
 //     mxr_max_views(), mxr_input_floats(), mxr_view_floats(),
 //     mxr_viewport_ints(), mxr_input_buffer(), mxr_view_buffer(),
 //     mxr_viewport_buffer(), mxr_near_z(), mxr_far_z()
-//                                 -- all constant for the page's life;
-//                                    query once and cache.
+//                                 -- all constant for the page's life and
+//                                    none of them model-dependent; query
+//                                    once and cache. (They are in fact
+//                                    callable before the load; they are
+//                                    listed here because that is where the
+//                                    shell reads them.)
 //
 //   first frame of each session, not session entry:
 //     mxr_set_clock_source(name)  -- names the shell's ONE latched clock,
@@ -88,7 +105,57 @@
 // `#mxr-canvas` — a hardcoded contract with app/web/index.html, and the one
 // piece of this ABI that is not visible in a signature.
 MXR_ABI_EXPORT int mxr_init(void);        // GL context, shaders, GL state
-MXR_ABI_EXPORT int mxr_load_model(void);  // MEMFS -> mj_loadXML -> geometry
+
+// The scene catalogue, straight out of src/robot_spec.c, so the page carries
+// NO per-robot content: app/web/index.html has an empty container and
+// shell.js builds one link per entry. Adding a robot therefore cannot
+// produce the failure where a scene exists in C and is unreachable from the
+// UI, which is what a hand-written list of links would eventually do.
+//
+// These three are named `menu` rather than `scene` because they are a
+// genuinely different interface from src/robot_spec.h's mxr_scene_count/at/
+// by_id: a `const MxrScene*` cannot cross this ABI, so these are index-and-
+// string-returning and answer out-of-range with "" rather than NULL. The
+// naming is forced as well as chosen — the src/ symbols are ordinary linked
+// symbols in the same binary, so reusing their names would be a
+// duplicate-symbol link error rather than an override.
+//
+// mxr_menu_count has nothing to marshal — it is `int(void)` and so is
+// mxr_scene_count — so the honest question is why it is not just
+// MXR_ABI_EXPORT on the original. Because MXR_ABI_EXPORT is defined in THIS
+// header, and src/robot_spec.h is the portable tier: exporting it there would
+// put a web-target concern into a file that Android and the host binaries
+// also compile. The twin keeps that boundary at the cost of one forwarding
+// line, which is the right trade in that direction.
+// Index i is valid for [0, mxr_menu_count()); out of range returns "".
+MXR_ABI_EXPORT int         mxr_menu_count(void);
+MXR_ABI_EXPORT const char* mxr_menu_id(int i);     // the `?scene=` token
+MXR_ABI_EXPORT const char* mxr_menu_label(int i);  // shown to a human
+
+// MEMFS -> mj_loadXML -> geometry, for one catalogue entry. CALLED ZERO OR
+// ONE TIMES PER PAGE: the page compiles nothing until a scene is picked,
+// since compiling a 67-mesh model the user did not ask for is ~11 MB of VBO
+// and a second or so of a headset browser's time.
+//
+// `scene_id` must be an id from mxr_menu_id; anything else is a graceful
+// failure naming the id, because this value arrives from the query string and
+// is therefore user input.
+//
+// THE TWO FAILURES ARE NOT DISTINGUISHABLE FROM THE RETURN VALUE, and both
+// return 1: "you passed an id that is not in the table" (a programmer bug,
+// or a stale bookmark) and "the id is right but its files are not in the
+// bundle" (the packaging bug this header warns about at MxrScene::id — a
+// staging line that disagrees with the table). Telling them apart today means
+// substring-matching mxr_last_error(): the first says `unknown scene '<id>'`,
+// the second `mj_loadXML(/<id>/ar_scene.xml) failed`. Both name the id, which
+// is enough to act on; a distinct return code would be better and nothing
+// needs one yet.
+//
+// There is no unload and no second call: switching scenes is a page RELOAD
+// with a different `?scene=`, which is the only teardown that reclaims the GL
+// context, the wasm heap and SimScene's latched clock together. A second call
+// is refused rather than leaking the live model.
+MXR_ABI_EXPORT int mxr_load_model(const char* scene_id);
 // Named `last_error` rather than `error` because src/mxr_error.h is a
 // different and near-opposite thing (MuJoCo's mju_user_error hooks, which
 // abort); this is the string you read after a graceful non-zero return.

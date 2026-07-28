@@ -1,7 +1,8 @@
 # MuJoCoXR
 
 MuJoCo physics running **fully on-device** on a standalone XR headset
-(Quest-class), with the Franka Emika Panda teleoperated by an XR controller.
+(Quest-class), with a robot arm teleoperated by an XR controller — a Franka
+Emika Panda or an SO-101, picked at load time.
 The MuJoCo C API with two thin shells over one shared core: raw
 OpenXR + Vulkan on Android, and WebXR + WebGL2 in the headset browser. No
 game engine, no Python in the app, no desktop in the loop.
@@ -10,13 +11,20 @@ game engine, no Python in the app, no desktop in the loop.
 
 - **On-device physics** — unmodified upstream MuJoCo v3.10.0 (fetched and
   pinned at build time, zero source patches) compiled GL-free via the
-  filament-mjr-compat flag set; the unmodified MuJoCo Menagerie Franka scene
-  steps at 500 Hz on the headset CPU — composed onto a table in an AR
-  scene (`assets/ar_scene.xml`) without touching the upstream files.
+  filament-mjr-compat flag set; the unmodified MuJoCo Menagerie scenes
+  step at 500 Hz on the headset CPU — composed onto a table in an AR
+  scene (`assets/<id>/ar_scene.xml`) without touching the upstream files.
+- **Two robots** — a Franka Emika Panda (7 dof) and an SO-101 (5 dof), each
+  a scene the user picks: a DOM menu before entering on the web, and the B
+  button to cycle in-headset on Android. The robot is identified by PROBING
+  the loaded model, so no robot id is ever passed in. Adding a third is a
+  checklist, all of it data —
+  [docs/adding-a-robot.md](docs/adding-a-robot.md) is authoritative and this
+  bullet deliberately does not restate the count.
 - **Raw OpenXR shell** — `NativeActivity` + Khronos loader:
   `XR_KHR_vulkan_enable2` device handshake, `LOCAL_FLOOR` reference space
   (STAGE/LOCAL fallbacks), full session lifecycle, Touch-controller action
-  set (grip pose, trigger, squeeze, A).
+  set (grip pose, trigger, squeeze, A, B).
 - **AR passthrough** — alpha-blend environment mode when the runtime
   offers it (Pico/Quest-class MR): the scene renders over the camera feed;
   no skybox, no ground plane. The robot stands on a virtual table whose
@@ -27,11 +35,14 @@ game engine, no Python in the app, no desktop in the loop.
   driven exclusively by `XrView` pose/fov, one directional light.
 - **Clutched teleop** — squeeze-hold clutch latches controller→target
   offsets in MuJoCo world coordinates (zero jump on engage, by
-  construction); damped-least-squares IK (6D task, 7-DOF arm) with a
-  nullspace home-posture bias and gravity feed-forward writes the position
-  servos; targets rate-limited at 1.5 m/s / 3 rad/s; trigger drives the
-  gripper (inverted 0–255 range, 255 = open); A resets to the home
-  keyframe; recentering auto-disengages the clutch.
+  construction); damped-least-squares IK — a 6D task against a 7-dof arm on
+  the Franka and a rank-deficient 5-dof one on the SO-101, with the
+  rotation-vs-position weight and the nullspace home-posture bias tabulated
+  per robot — plus gravity feed-forward writes the position servos; targets
+  rate-limited at 1.5 m/s / 3 rad/s; trigger drives the gripper through that
+  robot's tabulated jaw endpoints (Franka 255 → 0, SO-101 1.745 → 0 rad; the
+  polarity is per-model, not a convention); A resets to the home keyframe;
+  recentering auto-disengages the clutch.
 - **Owned frame conventions** — `src/frames.h` is the single owner of the
   XR↔MuJoCo mapping (`MXR_Q_MJ_FROM_XR = (0.5, 0.5, −0.5, −0.5)` wxyz;
   xyzw↔wxyz quaternion reordering at every crossing), with a world-axes gizmo
@@ -70,7 +81,7 @@ game engine, no Python in the app, no desktop in the loop.
 
 ## Build & run
 
-Fetch the Franka scene (sparse, pinned; used by host tools and the APK):
+Fetch the robot scenes (sparse, pinned; used by host tools and the APK):
 
 ```
 scripts/fetch-menagerie.sh
@@ -84,8 +95,14 @@ cmake --build build --parallel
 ./build/ik_prototype third_party/menagerie/franka_emika_panda/scene.xml
 ./build/baseline     third_party/menagerie/franka_emika_panda/scene.xml
 ./build/teleop_replay build/franka/ar_scene.xml \
-    --ref baselines/teleop-host-x86_64.txt
+    --ref baselines/teleop-franka-host-x86_64.txt
+./build/teleop_replay build/so101/ar_scene.xml \
+    --ref baselines/teleop-so101-host-x86_64.txt
 ```
+
+Both must print `replay_check = PASS`. One reference per scene, named for
+the scene id; `baseline` and `testspeed` stay Franka-only (see the `nu < 8`
+comment in `bench/baseline.cc`).
 
 The host build is the common prefix of all three targets — it compiles and
 links the entire portable core, so it is the fastest way to find out whether
@@ -155,7 +172,9 @@ An existing MuJoCo checkout can be used instead of the download with
 `-DMUJOCOXR_MUJOCO_DIR=/path/to/mujoco` (must be v3.10.0).
 
 In the headset: squeeze to clutch the green target marker to your hand,
-trigger to close the gripper, A to reset the scene. Follow
+trigger to close the gripper, A to reset the scene, B to cycle to the next
+robot (Android only — on the web, B ends the session and robots are picked
+from the page menu). Follow
 [docs/validation-android.md](docs/validation-android.md) for the ordered
 bring-up gates (benchmark → XR skeleton → handedness → teleop acceptance →
 soak). The browser target has the same five gates in
@@ -165,8 +184,9 @@ green — nothing here has ever run on a headset.
 ## Layout
 
 - `src/` — the portable core, shared by both shells and by the host tools:
-  frame conventions, clutched teleop, DLS IK, the frame loop
-  (`sim_scene`), mesh building, rate limiter, logging, error hooks. What
+  frame conventions, the robot/scene tables (`robot_spec`), clutched teleop,
+  DLS IK, the frame loop (`sim_scene`), mesh building, rate limiter, logging,
+  error hooks. What
   makes this a real tier is the `mxr_core` CMake target's restricted source
   list, built in the default host configuration on every build — not the
   directory name.
@@ -177,13 +197,15 @@ green — nothing here has ever run on a headset.
   GLSL ES shaders, `shell.js`, `index.html`
 - `host/` — host-side IK prototype (convergence + nullspace checks)
 - `bench/` — invariant baseline recorder/checker, teleop replay, `testspeed`
-- `baselines/` — recorded references: the cross-platform invariant, and the
-  host teleop-refactor lock
+- `baselines/` — recorded references: the cross-platform invariant, and one
+  host teleop lock per scene (`teleop-<id>-host-x86_64.txt`)
 - `scripts/` — Menagerie scene fetcher (sparse, pinned), and a TLS dev
   server for headsets that cannot be reached over adb
-- `docs/` — per-target validation guides, with shared gate numbering
+- `docs/` — per-target validation guides with shared gate numbering, and
+  [docs/adding-a-robot.md](docs/adding-a-robot.md)
 
 ## License notes
 
-MuJoCo and the MuJoCo Menagerie Franka model are Apache-2.0; the packaging
-script ships the model's LICENSE inside the APK.
+MuJoCo and the MuJoCo Menagerie Franka and SO-101 models are Apache-2.0; the
+packaging script ships each model's LICENSE inside the APK, in that model's
+own asset directory.

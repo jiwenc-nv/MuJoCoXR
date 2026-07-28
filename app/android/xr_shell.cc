@@ -318,6 +318,7 @@ bool XrShell::CreateActions() {
       {"trigger", XR_ACTION_TYPE_FLOAT_INPUT, &trigger_action_},
       {"squeeze", XR_ACTION_TYPE_FLOAT_INPUT, &squeeze_action_},
       {"reset_click", XR_ACTION_TYPE_BOOLEAN_INPUT, &a_action_},
+      {"scene_click", XR_ACTION_TYPE_BOOLEAN_INPUT, &b_action_},
   };
   for (auto& a : actions) {
     XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
@@ -333,8 +334,9 @@ bool XrShell::CreateActions() {
   }
 
   // Per-profile suggestions, one call each. Same semantics everywhere:
-  // squeeze = clutch, trigger = analog gripper, A/X = reset; B stays
-  // unbound (squeeze re-engage already re-anchors by construction).
+  // squeeze = clutch, trigger = analog gripper, A/X = reset, B/Y = cycle to
+  // the next scene. B is the one action that does not become an InputState
+  // field — see b_down() in xr_shell.h for why the core cannot own it.
   auto path = [&](const char* p) {
     XrPath out;
     xrStringToPath(instance_, p, &out);
@@ -361,10 +363,12 @@ bool XrShell::CreateActions() {
                 {trigger_action_, path("/user/hand/right/input/trigger/value")},
                 {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
                 {a_action_, path("/user/hand/right/input/a/click")},
+                {b_action_, path("/user/hand/right/input/b/click")},
                 {grip_action_, path("/user/hand/left/input/grip/pose")},
                 {trigger_action_, path("/user/hand/left/input/trigger/value")},
                 {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
-                {a_action_, path("/user/hand/left/input/x/click")}})) {
+                {a_action_, path("/user/hand/left/input/x/click")},
+                {b_action_, path("/user/hand/left/input/y/click")}})) {
     return false;  // core profile: failure means the setup itself is broken
   }
 
@@ -382,11 +386,13 @@ bool XrShell::CreateActions() {
            {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
            {squeeze_action_, path("/user/hand/right/input/squeeze/click")},
            {a_action_, path("/user/hand/right/input/a/click")},
+           {b_action_, path("/user/hand/right/input/b/click")},
            {grip_action_, path("/user/hand/left/input/grip/pose")},
            {trigger_action_, path("/user/hand/left/input/trigger/value")},
            {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
            {squeeze_action_, path("/user/hand/left/input/squeeze/click")},
-           {a_action_, path("/user/hand/left/input/x/click")}});
+           {a_action_, path("/user/hand/left/input/x/click")},
+           {b_action_, path("/user/hand/left/input/y/click")}});
     }
   }
 
@@ -666,6 +672,19 @@ void XrShell::SyncInput(XrTime time, InputState* input) {
     // frame 1, and Teleop::Update's `frame_ > 1` now suppresses it. Better,
     // but not "bit-identical" — say which, rather than claim identity.
     input->a_down = b.currentState;
+  }
+
+  // B/Y, the scene-cycle button. Read the same way as A but parked on the
+  // shell rather than in InputState — see XrShell::b_down(). Left false when
+  // the action is inactive (khr/simple_controller has no B at all), so a
+  // fallback controller simply cannot switch scenes rather than switching
+  // them at random.
+  b_down_ = false;
+  get.action = b_action_;
+  XrActionStateBoolean bb{XR_TYPE_ACTION_STATE_BOOLEAN};
+  if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &get, &bb)) &&
+      bb.isActive) {
+    b_down_ = bb.currentState;
   }
 
   if (sync_count_ % 90 == 0) {

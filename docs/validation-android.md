@@ -56,11 +56,14 @@ adb shell mkdir -p $DEV
 adb push build-android/lib/libmujoco.so \
   $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so \
   build-android/baseline build-android/testspeed build-android/teleop_replay \
-  baselines/host-x86_64.txt baselines/teleop-host-x86_64.txt $DEV/
+  baselines/host-x86_64.txt baselines/teleop-franka-host-x86_64.txt \
+  baselines/teleop-so101-host-x86_64.txt $DEV/
 adb push third_party/menagerie/franka_emika_panda $DEV/franka_emika_panda
-# ar_scene.xml is first-party and lives in assets/; CMake stages it beside
-# the Menagerie files it includes, so push the STAGED tree, not third_party.
+# Each ar_scene.xml is first-party and lives in assets/<id>/; CMake stages it
+# beside the Menagerie files it includes, so push the STAGED trees, not
+# third_party. One directory per scene id.
 adb push build-android/franka $DEV/franka
+adb push build-android/so101 $DEV/so101
 adb shell chmod +x $DEV/baseline $DEV/testspeed $DEV/teleop_replay
 
 # 67-mesh load + decoder registration + dynamics invariant vs host reference
@@ -202,27 +205,47 @@ rotationally inert — not double rounding).
 it is `chmod +x`'d there, so this needs no setup of its own:
 
 ```
-adb shell "cd $DEV && LD_LIBRARY_PATH=$DEV ./teleop_replay franka/ar_scene.xml --ref teleop-host-x86_64.txt"
+adb shell "cd $DEV && LD_LIBRARY_PATH=$DEV ./teleop_replay franka/ar_scene.xml --ref teleop-franka-host-x86_64.txt"
+adb shell "cd $DEV && LD_LIBRARY_PATH=$DEV ./teleop_replay so101/ar_scene.xml --ref teleop-so101-host-x86_64.txt"
 ```
 
 That checks the frame convention, the engage and slew assertions and the
 geometry census, and **skips the bitwise trace comparison loudly**, because
-that reference records `arch = x86_64` and this build reports `aarch64`. That
-is the correct answer, not a failure. **UN-RUN** — `blocked on: a physical
-arm64 device over adb.`
+those references record `arch = x86_64` and this build reports `aarch64`. That
+is the correct answer, not a failure.
+
+Two of the recorded fields ARE compared here, and they are the reason running
+this on arm64 is worth anything at all now that the hash is skipped:
+
+- `opt_timestep` / `opt_integrator` / `opt_cone` / `opt_impratio` — the
+  scene's solver configuration. A wrapper XML that silently loses its
+  `<option>` block (see `assets/so101/ar_scene.xml`) fails as a named line.
+- `pos_med_mm` — median target-to-TCP distance over the engaged frames,
+  against a 1.5x + 1 mm tolerance. Verified identical to two decimals between
+  x86_64 and wasm32 (Franka 23.69 mm, SO-101 2.23 mm), so a material
+  difference on arm64 is a finding, not noise.
+
+**UN-RUN** — `blocked on: a physical arm64 device over adb.`
 
 Requiring a headset:
 
 - Clutch engage/disengage (squeeze > 0.8 / < 0.6): zero marker jump.
 - Marker tracks the hand under the 1.5 m/s / 3 rad/s rate limits; the arm
   follows. Logcat prints `teleop: engaged | target-TCP: X mm, Y deg` once a
-  second — expect ≤ 2 cm / 5° while moving at ~0.25 m/s.
-- Trigger closes the gripper monotonically (255 = open, inverted mapping).
-  A `gripper ctrlrange is (...)` warning at startup means this model's
-  actuator range is not (0, 255) and the mapping is wrong for it.
+  second — expect ≤ 2 cm / 5° while moving at ~0.25 m/s. **This is a
+  hand-motion figure and is not the `pos_med_mm` the replay gate records**;
+  that one is measured over a scripted trajectory that drives the arm much
+  harder, and the Franka's shipped value is 23.69 mm. A Franka printing ~2 cm
+  here is nominal, not broken.
+- Trigger closes the gripper monotonically, from that robot's tabulated
+  `gripper_open` at trigger 0 to `gripper_closed` at 1 (Franka 255 → 0,
+  SO-101 1.745 → 0; both are "low = closed" but that is a coincidence of the
+  two models, not a rule). A `gripper endpoints ... fall outside` warning at
+  startup means `src/robot_spec.c` disagrees with the model.
 - A resets to `home` and re-anchors the marker at the TCP.
 - Recentering mid-clutch auto-disengages
-  (`teleop: clutch auto-disengaged (recenter)`); B does nothing (unbound).
+  (`teleop: clutch auto-disengaged (recenter)`).
+- **B cycles the scene.** Read the note below before treating this as a menu.
 - **Grip lever-arm check**: engage, then twist ~90° about the controller's
   own axis without translating. Accept ≤ 5 mm of target motion. > 2 cm means
   the WebXR and OpenXR grip origins genuinely differ, and the fix is a
@@ -249,11 +272,46 @@ Requiring a headset:
   documented here (one `sim deficit` line) described behaviour the code did
   not produce. **UN-RUN** — `blocked on: a physical headset.`
 
-Feel tuning: `lambda` / `ns_gain` in `src/ik_dls.c`. The clutch motion scale
-is `Teleop::scale_` in `src/teleop.h` — a private member fixed at 1.0 with no
-setter, so changing it today means editing and rebuilding. It is a
-control–display ratio rather than a safety limit, and the TODO beside it
-names the setter it wants.
+### Switching robots on Android — this is not a menu
+
+**Android has no in-headset scene menu, and cannot have one today: this stack
+has no text rendering, so there is nothing to draw one with.** The app starts
+on the first scene in `src/robot_spec.c` and **B switches to the next one**.
+Choosing a scene before entering is Web-only (`?scene=<id>`, see
+[validation-web.md](validation-web.md)).
+
+That is a deviation from "a menu on start", stated as one rather than
+described as a feature. It was taken because the alternative — one launcher
+icon per robot — is *measured dead*: two
+`<activity android:name="android.app.NativeActivity">` entries link and
+install, but they collapse to a single `ComponentName`, so only one is ever
+resolved, and distinguishing them requires subclassing `NativeActivity`,
+which requires Java, which ends `android:hasCode="false"`. The tiebreaker was
+the failure shape: the launcher approach fails **at install**, with no path
+to any robot at all, while B-cycling fails **only if you press B**.
+
+Because there is no label to read in-headset, **every cycle logs one line**,
+and it is the only way to answer "which robot am I on":
+
+```
+adb logcat -s mujocoxr | grep '^.*scene:'
+# scene: Franka Emika Panda (franka), 1 of 2
+# scene: SO-101 (so101), 2 of 2
+```
+
+Acceptance for a cycle: the arm is replaced, the clutch is **dropped** (the
+swap runs `EndSession` first), the marker re-anchors at the new robot's TCP,
+and there is no `sim deficit` line on the following frame. A failed load
+degrades to the clear-color loop with `assets/<id> not found in APK` — the
+app stays usable on nothing, which is the bounded-downward case the design
+chose. **UN-RUN** — `blocked on: a physical headset.`
+
+Feel tuning is now per robot and lives in one place: the row in
+`src/robot_spec.c`. `w_rot`, `lambda`, `ns_gain` and `clutch_scale` are
+fields there, each with the measurement that chose it written beside it.
+**`w_rot`, `clutch_scale` and the robot's placement are the three numbers
+most likely to move on the first on-device session**; when one does,
+re-record that scene's baseline in the same commit and say which number moved.
 
 ## 5. Soak
 

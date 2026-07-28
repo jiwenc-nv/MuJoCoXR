@@ -15,13 +15,20 @@
 // indices — would change the bytes in Android's index buffer, on a target
 // with no hardware to re-verify. Five lines here instead.
 //
-// There is no Destroy. android_main genuinely returns, so the Vulkan twin
-// tears down into a live process; a page does not — the tab going away
-// reclaims the GL context, the wasm heap and this object together. A
-// Destroy() here would have had zero callers, and a reader finding one would
-// reasonably wire it to `beforeunload`/`visibilitychange`, which is the
-// speculative page lifecycle this design refuses. GL objects here live
-// exactly as long as the page does.
+// There is no Destroy, and the reason is now a caller rather than an
+// argument. The Vulkan twin has one because android_main returns into a live
+// process and app/android/main.cc calls SceneRenderer::Destroy() at two
+// points: at exit, and on every B-press, because switching scenes there means
+// rebuilding the model in-process. THIS renderer has no such caller and
+// cannot acquire one, because app/web/shell.js switches scenes by navigating
+// to a new ?scene= — the page teardown reclaims the GL context, the wasm heap
+// and this object together, and it is also the only teardown that clears
+// SimScene's latched clock. So the two targets differ here because their
+// scene-switch mechanisms differ, not because one of them forgot.
+//
+// If you are adding a Destroy() here, the question to answer first is what
+// calls it. `beforeunload`/`visibilitychange` is not an answer — that is a
+// speculative page lifecycle, and the browser already does the work.
 
 #ifndef MUJOCOXR_APP_WEB_SCENE_RENDERER_H_
 #define MUJOCOXR_APP_WEB_SCENE_RENDERER_H_

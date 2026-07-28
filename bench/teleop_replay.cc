@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <mujoco/mujoco.h>
@@ -33,6 +34,7 @@
 #include "frames.h"
 #include "mesh_buffers.h"
 #include "mxr_error.h"
+#include "robot_spec.h"
 #include "sim_scene.h"
 
 namespace {
@@ -268,6 +270,108 @@ struct SlewWatch {
   }
 };
 
+// How far the tool actually is from where it was told to be, per engaged
+// frame, in millimetres. The bitwise trace and this bound catch DIFFERENT
+// things and neither subsumes the other: the trace catches a changed line and
+// says nothing about whether the numbers were ever any good, while this
+// catches a bad src/robot_spec.c row — a mistyped w_rot, lambda, ns_gain or
+// clutch_scale — which the trace would happily lock in as the new truth.
+//
+// WHAT IT PROVABLY CANNOT CATCH is a wrong `tcp_offset`. Observe() below
+// computes the TCP as xpos[tcp_body] + rot(spec->tcp_offset, xquat[tcp_body]),
+// which is the same expression, reading the same table field, that ik_dls_tcp
+// uses and that Teleop::Init uses to seed target_pos_. A wrong offset moves
+// the measured TCP and the commanded target together, so pos_med barely
+// responds: measured, 50 mm of z error on the SO101 row moves it 2.23 ->
+// 2.69 mm, an eighth of its own 4.34 mm bound. (Not exactly zero, because the
+// offset is rotated by the live xquat while the seed used the home one.)
+// Catching that needs a claim anchored outside the table — an authored site's
+// world position, say — and this check is not it.
+//
+// It exists because the alternative was measured and found empty: at a
+// deliberately degenerate table row (w_rot = 1.0 on the SO101, 54.1 mm of
+// error) all seven of this file's other assertions print [ok] and
+// replay_check reports PASS. A smoke run gates nothing about the table.
+//
+// The TCP is recomputed HERE from the model rather than read back from the
+// solver, for the same reason kMaxLinRate is duplicated forty lines up: a
+// check that asks the implementation where it thinks the tool is cannot fail.
+// It is checked as a REGRESSION AGAINST THE RECORDED REFERENCE, not against a
+// fixed constant, and that is a correction to the plan rather than a
+// preference. A single absolute bound was specified — 15 mm — calibrated on
+// the SO101. Measuring the Franka, which had never been measured, shows why it
+// cannot be one number (this build, x86_64, 239 engaged frames):
+//
+//   Franka  shipping row       23.69 mm   <- would FAIL a 15 mm bound
+//   SO101   shipping row        2.23 mm
+//   SO101   w_rot 0.05 -> 0.10  6.10 mm
+//   SO101   w_rot 0.05 -> 0.30 28.91 mm   <- must stay red
+//   SO101   w_rot 0.05 -> 1.00 53.60 mm   <- must stay red
+//
+// Any constant admitting the Franka's 23.69 must sit above it, and any
+// constant catching the SO101's degenerate 28.91 must sit below that: the
+// entire admissible window is (23.69, 28.91), which is far too tight to be a
+// gate anyone could trust. The Franka's figure is not a defect — its clutch
+// scale is 1.0 against the SO101's 0.5, so the script commands it twice as
+// far and twice as fast, and its golden trace is bit-for-bit unchanged, so
+// this is simply what it has always done.
+//
+// The reference file is already the per-robot artifact, so the bound lives
+// there as a recorded value and the check is "not materially worse than
+// recorded". That is per-robot for free, with NO robot-specific branch here
+// and no second table to keep in sync; it is deliberately not bitwise, so a
+// benign refactor cannot redden it and train anyone to regenerate without
+// reading; and a 13x regression like the w_rot typo above is caught on either
+// robot.
+struct ReachWatch {
+  // Generous against noise, tight against a bad row. The smallest degenerate
+  // step measured above is 2.7x (2.23 -> 6.10 mm) and the ones that matter
+  // are 13x and 24x, so 1.5x + 1 mm has roughly an order of magnitude of
+  // headroom in both directions. The additive term keeps the ratio from being
+  // hair-triggered on sub-millimetre values.
+  static double Bound(double recorded) { return 1.5*recorded + 1.0; }
+
+  const MxrRobot* robot = nullptr;
+  int body = -1;
+  double err_mm[kFrames] = {0};
+  int n = 0;
+
+  void Init(const mjModel* m) {
+    const char* why = "(no reason reported)";
+    robot = mxr_robot_probe(m, &why);
+    if (!robot) {
+      fprintf(stderr, "ReachWatch: %s\n", why);
+      return;
+    }
+    body = mj_name2id(m, mjOBJ_BODY, robot->tcp_body);
+  }
+
+  void Observe(const mjData* d, const mjtNum* target_pos, bool engaged) {
+    if (body < 0 || !engaged || n >= kFrames) {
+      return;
+    }
+    mjtNum off[3], tcp[3], dp[3];
+    mju_rotVecQuat(off, robot->tcp_offset, d->xquat + 4*body);
+    mju_add3(tcp, d->xpos + 3*body, off);
+    mju_sub3(dp, target_pos, tcp);
+    err_mm[n++] = 1000*mju_norm3(dp);
+  }
+
+  static int Cmp(const void* a, const void* b) {
+    const double x = *static_cast<const double*>(a);
+    const double y = *static_cast<const double*>(b);
+    return x < y ? -1 : (x > y ? 1 : 0);
+  }
+
+  double Median() {
+    if (n == 0) {
+      return 0;
+    }
+    qsort(err_mm, n, sizeof(err_mm[0]), Cmp);
+    return err_mm[n/2];
+  }
+};
+
 // Census over the DEREFERENCED triangle set, never over base_vertex values —
 // otherwise this locks in the very index convention it exists to outlive.
 uint64_t TriangleChecksum(const MeshBuffers& mb) {
@@ -287,9 +391,40 @@ struct Ref {
   unsigned long long trace = 0;
   unsigned long long tris = 0;
   long verts = -1, indices = -1, meshes = -1, frames = -1;
+  // Negative means the line was absent from the reference, which is a FAILURE
+  // ("ref: records pos_med_mm") rather than a skip — see the check site. The
+  // sentinel exists only so that absence is distinguishable from a recorded
+  // 0.00 mm, not so that it can be tolerated.
+  double pos_med = -1;
+  // The scene's solver configuration. Architecture-independent, so compared
+  // on every target. These are what catch a wrapper XML that switched to
+  // <attach> without <compiler conflict="merge"/> and silently lost the
+  // child model's whole <option> block — see assets/so101/ar_scene.xml.
+  // Negative/absent is a failure, as for pos_med: every real value is > 0
+  // (timestep, impratio) or an enum >= 0 (integrator, cone).
+  double opt_timestep = -1, opt_impratio = -1;
+  long opt_integrator = -1, opt_cone = -1;
   char arch[32] = "";
   bool found = false;
 };
+
+const char* IntegratorName(int i) {
+  switch (i) {
+    case mjINT_EULER:        return "euler";
+    case mjINT_RK4:          return "rk4";
+    case mjINT_IMPLICIT:     return "implicit";
+    case mjINT_IMPLICITFAST: return "implicitfast";
+    default:                 return "?";
+  }
+}
+
+const char* ConeName(int c) {
+  switch (c) {
+    case mjCONE_PYRAMIDAL: return "pyramidal";
+    case mjCONE_ELLIPTIC:  return "elliptic";
+    default:               return "?";
+  }
+}
 
 bool ReadRef(const char* path, Ref* ref) {
   FILE* f = fopen(path, "r");
@@ -314,8 +449,16 @@ bool ReadRef(const char* path, Ref* ref) {
       ref->meshes = v;
     } else if (sscanf(line, "nframes = %ld", &v) == 1) {
       ref->frames = v;
+    } else if (sscanf(line, "pos_med_mm = %lf", &ref->pos_med) == 1) {
+      // tracking quality, compared with a tolerance (see ReachWatch)
     } else if (sscanf(line, "arch = %31s", ref->arch) == 1) {
       // recorded architecture; gates the bitwise trace comparison only
+    } else if (sscanf(line, "opt_timestep = %lf", &ref->opt_timestep) == 1) {
+    } else if (sscanf(line, "opt_integrator = %ld", &v) == 1) {
+      ref->opt_integrator = v;
+    } else if (sscanf(line, "opt_cone = %ld", &v) == 1) {
+      ref->opt_cone = v;
+    } else if (sscanf(line, "opt_impratio = %lf", &ref->opt_impratio) == 1) {
     }
   }
   fclose(f);
@@ -365,6 +508,31 @@ int main(int argc, char** argv) {
   printf("mujoco_version = %s\n", mj_versionString());
   printf("arch = %s\n", kArch);
   printf("nq = %ld\n", static_cast<long>(model->nq));
+  // THE SOLVER CONFIGURATION, PRINTED. These four are architecture-INDEPENDENT,
+  // so unlike trace_fnv1a — which is a bitwise lock and is skipped by design
+  // on wasm and aarch64 — they are compared on every target the replay runs
+  // on. They exist because the way a scene silently loses its physics is not
+  // a code edit: MuJoCo's <attach> under the default conflict policy discards
+  // the child model's whole authored <option> block, measured as all six
+  // fields including integrator implicitfast->Euler and cone
+  // elliptic->pyramidal, and produces no error. That fails as a named line in
+  // a diff here instead of an opaque hash mismatch, or — off the recording
+  // architecture — as nothing at all.
+  // The enum NAME is appended after the integer, and the integer comes first
+  // so that ReadRef's `%ld` still parses these lines unchanged — it stops at
+  // the space and discards the rest, so old reference files stay valid.
+  // THE NAME IS NEVER READ BACK; the integer is the whole comparison. A
+  // half-hand-edited line whose name contradicts its own integer is therefore
+  // silent — which is the right way round (a wrong name cannot mask a real
+  // config change), but worth knowing before hand-editing one.
+  // The name is for the human reading a failing diff:
+  // "opt_integrator = 3 -> 0" says much less than "implicitfast -> euler",
+  // and telling those apart is this block's entire job.
+  printf("opt_timestep = %.17g\n", model->opt.timestep);
+  printf("opt_integrator = %d (%s)\n", model->opt.integrator,
+         IntegratorName(model->opt.integrator));
+  printf("opt_cone = %d (%s)\n", model->opt.cone, ConeName(model->opt.cone));
+  printf("opt_impratio = %.17g\n", model->opt.impratio);
   printf("nframes = %d\n", kFrames);
   printf("frame_dt = %.17g\n", kFrameDt);
   printf("census_vertices = %zu\n", mb.verts.size());
@@ -375,6 +543,8 @@ int main(int argc, char** argv) {
 
   EngageWatch engage;
   SlewWatch slew;
+  ReachWatch reach;
+  reach.Init(model);
   uint64_t hash = 14695981039346656037ull;
   const Teleop& teleop = sim.teleop();
   for (int k = 0; k < kFrames; ++k) {
@@ -386,6 +556,7 @@ int main(int argc, char** argv) {
     const bool engaged = teleop.engaged();
     engage.Observe(engaged, teleop.target_pos(), teleop.target_quat());
     slew.Observe(teleop.target_pos(), teleop.target_quat(), dt, in.a_down);
+    reach.Observe(data, teleop.target_pos(), engaged);
 
     const unsigned char e = engaged ? 1u : 0u;
     hash = FnvUpdate(hash, &e, 1);
@@ -410,6 +581,11 @@ int main(int argc, char** argv) {
     }
   }
   printf("trace_fnv1a = 0x%016llx\n", static_cast<unsigned long long>(hash));
+  // Two decimals, not %.17g: this one is compared with a tolerance rather than
+  // bitwise, and printing digits that differ between architectures would
+  // invite someone to read a meaningless diff as a regression.
+  const double pos_med = reach.Median();
+  printf("pos_med_mm = %.2f\n", pos_med);
 
   CheckFrameConvention();
   Check(engage.engages >= 3, "teleop: script reached >= 3 engages");
@@ -418,8 +594,22 @@ int main(int argc, char** argv) {
   fprintf(stderr, "  (%d engages, worst |dpos| %.3g m, worst angle %.3g rad)\n",
           engage.engages, engage.worst_pos, engage.worst_quat_rad);
   Check(slew.ok, "teleop: slew within rate limits");
-  fprintf(stderr, "  (worst lin %.6f, ang %.6f of the bound)\n",
-          slew.worst_lin, slew.worst_ang);
+  // Print the bounds, not just the fractions: a fraction of an unnamed bound
+  // is unreadable in a failing diff, and these two are the duplicated
+  // constants at the top of this file rather than teleop.cc's.
+  fprintf(stderr, "  (worst lin %.6f of %.2f m/s, ang %.6f of %.2f rad/s)\n",
+          slew.worst_lin, kMaxLinRate, slew.worst_ang, kMaxAngRate);
+
+  // A standing guard against the tracking gate passing VACUOUSLY: with n == 0,
+  // Median() returns 0, and "tracking not regressed" prints [ok] over an empty
+  // sample set. Nothing in the tree reaches that today — ReachWatch::Init and
+  // Teleop::Init share one mxr_robot_probe call and main() has already bailed
+  // with "teleop init failed" if it missed, so body >= 0 by the time we get
+  // here — which is exactly why the assumption is worth pinning rather than
+  // leaving as a coincidence of two initialisers happening to agree.
+  Check(reach.n > 0, "teleop: reach samples recorded");
+  fprintf(stderr, "  (pos_med %.2f mm over %d engaged frames)\n", pos_med,
+          reach.n);
 
   if (ref_path) {
     Ref ref;
@@ -433,6 +623,59 @@ int main(int argc, char** argv) {
               ref.meshes == static_cast<long>(mb.meshes.size()),
           "ref: geometry census matches");
     Check(ref.tris == TriangleChecksum(mb), "ref: triangle set matches");
+
+    // The solver configuration, ACTUALLY COMPARED. Until now these four were
+    // printed into the reference and never read back out of it, so the block
+    // whose stated job is to catch a lost <option> section only did so if a
+    // human eyeballed a stdout diff. Architecture-independent, so this runs
+    // on every target. The doubles round-trip exactly: they are written with
+    // %.17g and read with %lf.
+    Check(ref.opt_timestep >= 0 && ref.opt_integrator >= 0 &&
+              ref.opt_cone >= 0 && ref.opt_impratio >= 0,
+          "ref: records opt_*");
+    const bool opt_ok = ref.opt_timestep == model->opt.timestep &&
+                        ref.opt_integrator == model->opt.integrator &&
+                        ref.opt_cone == model->opt.cone &&
+                        ref.opt_impratio == model->opt.impratio;
+    Check(opt_ok, "ref: solver config matches");
+    if (!opt_ok) {
+      fprintf(stderr,
+              "solver config changed: timestep %.17g -> %.17g, integrator "
+              "%s -> %s, cone %s -> %s, impratio %.17g -> %.17g. If this "
+              "scene's wrapper just gained an <attach>, it needs "
+              "<compiler conflict=\"merge\"/> — see "
+              "assets/so101/ar_scene.xml\n",
+              ref.opt_timestep, model->opt.timestep,
+              IntegratorName(static_cast<int>(ref.opt_integrator)),
+              IntegratorName(model->opt.integrator),
+              ConeName(static_cast<int>(ref.opt_cone)),
+              ConeName(model->opt.cone), ref.opt_impratio,
+              model->opt.impratio);
+    }
+
+    // Architecture-INDEPENDENT, so unlike the trace hash below this one is
+    // checked on every target. It is what catches a bad src/robot_spec.c row,
+    // which a bitwise trace cannot: a wrong tuning value produces a
+    // self-consistent trace that simply tracks badly.
+    //
+    // A missing pos_med_mm is a FAILURE, not a skip. Both references in the
+    // tree carry it, so the only way to reach this is to hand-edit one — and
+    // the earlier behaviour (warn on stderr, still print PASS on stdout) meant
+    // deleting one line from a reference silently disarmed the only check that
+    // reads the tuning table.
+    Check(ref.pos_med >= 0, "ref: records pos_med_mm");
+    if (ref.pos_med >= 0) {
+      const double bound = ReachWatch::Bound(ref.pos_med);
+      Check(pos_med <= bound, "ref: tracking not regressed");
+      if (pos_med > bound) {
+        fprintf(stderr,
+                "pos_med regressed: %.2f mm against a recorded %.2f mm "
+                "(bound %.2f). This is a TUNING failure, not a refactor "
+                "failure — check the robot's row in src/robot_spec.c before "
+                "re-recording %s\n",
+                pos_med, ref.pos_med, bound, ref_path);
+      }
+    }
 
     // The census above IS a cross-architecture claim — mesh parsing and
     // qhull have to agree everywhere, and they do. The trace hash is not:

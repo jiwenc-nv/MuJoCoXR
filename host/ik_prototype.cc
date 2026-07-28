@@ -46,6 +46,7 @@ struct CaseResult {
   double pos_err_mm[kNumPhases];
   double ori_err_deg[kNumPhases];
   double home_dist_linf;  // final arm posture distance to home, rad
+  double ns_gain;         // the table's value, echoed so the run is readable
 };
 
 void WaypointPose(const Waypoint& w, const mjtNum p0[3], const mjtNum q0[4],
@@ -65,18 +66,26 @@ void SlewTarget(const mjtNum way_pos[3], const mjtNum way_quat[4], double dt,
                   tgt_quat);
 }
 
-CaseResult RunCase(const mjModel* m, mjtNum ns_gain) {
+CaseResult RunCase(const mjModel* m) {
   mjData* d = mj_makeData(m);
   int key = mj_name2id(m, mjOBJ_KEY, "home");
   mj_resetDataKeyframe(m, d, key);
   mj_forward(m, d);  // kinematics for the initial TCP pose
 
   IkDls ik;
-  if (ik_dls_init(&ik, m) != 0) {
-    fprintf(stderr, "ik_dls_init failed\n");
+  const char* why = nullptr;
+  if (ik_dls_init(&ik, m, &why) != 0) {
+    fprintf(stderr, "ik_dls_init failed: %s\n", why);
     exit(1);
   }
-  ik.ns_gain = ns_gain;
+  // EVERY tuned number here is the shipped one, read through ik.spec from the
+  // table row the probe matched. This binary used to take a mutable copy of
+  // that row so it could force ns_gain and print a 0.1-vs-0 contrast; that is
+  // gone for two reasons. The contrast asserted nothing — PASS was computed
+  // entirely from the 0.1 run — and the copy pointed IkDls::spec at a stack
+  // local, falsifying the "points into static storage in src/robot_spec.c"
+  // contract that header states. Reading the table also stops this binary
+  // silently disagreeing with the Franka row if the row is retuned.
 
   mjtNum p0[3], q0[4], tgt_pos[3], tgt_quat[4];
   ik_dls_tcp(&ik, d, p0, q0);
@@ -94,7 +103,7 @@ CaseResult RunCase(const mjModel* m, mjtNum ns_gain) {
     for (int s = 0; s < steps_per_phase; ++s) {
       if (s % kIkPeriodSteps == 0) {
         SlewTarget(way_pos, way_quat, dt_ik, tgt_pos, tgt_quat);
-        mjtNum dq[IK_NARM];
+        mjtNum dq[MXR_MAX_ARM];
         ik_dls_solve(&ik, m, d, tgt_pos, tgt_quat, dq);
         ik_dls_write_ctrl(&ik, m, d, dq);
       }
@@ -109,11 +118,12 @@ CaseResult RunCase(const mjModel* m, mjtNum ns_gain) {
   }
 
   double linf = 0;
-  for (int i = 0; i < IK_NARM; ++i) {
+  for (int i = 0; i < ik.narm; ++i) {
     double e = fabs(d->qpos[ik.qposadr[i]] - ik.qhome[i]);
     linf = e > linf ? e : linf;
   }
   res.home_dist_linf = linf;
+  res.ns_gain = ik.spec->ns_gain;
   mj_deleteData(d);
   return res;
 }
@@ -134,24 +144,24 @@ int main(int argc, char** argv) {
   }
   printf("mujoco_version = %s\n", mj_versionString());
 
-  CaseResult with_ns = RunCase(m, 0.1);
-  CaseResult no_ns = RunCase(m, 0.0);
+  CaseResult res = RunCase(m);
   mj_deleteModel(m);
 
   bool pass = true;
   for (int i = 0; i < kNumPhases; ++i) {
-    bool ok = with_ns.pos_err_mm[i] <= kMaxPosErrMm &&
-              with_ns.ori_err_deg[i] <= kMaxOriErrDeg;
+    bool ok = res.pos_err_mm[i] <= kMaxPosErrMm &&
+              res.ori_err_deg[i] <= kMaxOriErrDeg;
     pass = pass && ok;
     printf("phase %d: pos_err = %.3f mm, ori_err = %.3f deg  [%s]\n", i,
-           with_ns.pos_err_mm[i], with_ns.ori_err_deg[i], ok ? "ok" : "FAIL");
+           res.pos_err_mm[i], res.ori_err_deg[i], ok ? "ok" : "FAIL");
   }
-  bool home_ok = with_ns.home_dist_linf <= kMaxHomeDistRad;
+  // With the table's ns_gain non-zero this is the assertion that the home bias
+  // actually pulls: it is the only check in the tree that the nullspace term
+  // does its job on the arm that has a nullspace.
+  bool home_ok = res.home_dist_linf <= kMaxHomeDistRad;
   pass = pass && home_ok;
-  printf("home_dist_linf(ns_gain=0.1) = %.4f rad  [%s]\n",
-         with_ns.home_dist_linf, home_ok ? "ok" : "FAIL");
-  printf("home_dist_linf(ns_gain=0)   = %.4f rad  [info: nullspace contrast]\n",
-         no_ns.home_dist_linf);
+  printf("home_dist_linf(ns_gain=%.2f) = %.4f rad  [%s]\n", res.ns_gain,
+         res.home_dist_linf, home_ok ? "ok" : "FAIL");
   printf("ik_prototype: %s\n", pass ? "PASS" : "FAIL");
   return pass ? 0 : 1;
 }

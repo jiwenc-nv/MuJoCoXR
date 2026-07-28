@@ -98,10 +98,37 @@ if(ANDROID)
   target_link_libraries(mxr_platform INTERFACE log)
 endif()
 
+# Warnings, on FIRST-PARTY code only — this is an INTERFACE target that every
+# target we write links and that fetched MuJoCo does not, so upstream keeps
+# its own warning policy and ours cannot be drowned out by it.
+#
+# -Werror=format is the one promoted to an error, and it is not decoration.
+# MxrRobot and IkDls deliberately carry same-named fields of different types:
+# `spec->tcp_body` and `spec->gripper_act` are `const char*` names, while
+# `ik->tcp_body` and `ik->gripper_act` are the resolved int ids, and both
+# pairs appear within a few lines of each other in src/teleop.cc and
+# src/ik_dls.c with the string halves passed to %s. That pairing is the right
+# design — the name and the id are different things and want the same word —
+# but with no -Wformat a swap compiles clean and prints garbage or crashes.
+# This makes it a build failure instead. The alternative was renaming the
+# table columns to tcp_body_name / gripper_act_name, which was rejected
+# because those names are also the table's vocabulary in a dozen comments and
+# two error messages ("give the rows distinct tcp_body names").
+#
+# Verified clean at the time of writing across all three toolchains.
+# -Wno-missing-field-initializers is not laziness: `VkImageCreateInfo info{
+# VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};` is THE idiom for Vulkan and OpenXR —
+# set sType, zero the rest — and -Wextra flags every one of the ~60 of them in
+# app/android/. Warnings nobody can act on are how a build stops being read.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(mxr_platform INTERFACE
+    -Wall -Wextra -Wno-missing-field-initializers -Werror=format)
+endif()
+
 # PUBLIC mxr_platform rather than PUBLIC src: this target puts the whole
 # header tier on its consumers' include path, so it owes the tier's link
 # cost, whether or not ik_dls.c itself logs.
-add_library(mxr_ik STATIC src/ik_dls.c)
+add_library(mxr_ik STATIC src/ik_dls.c src/robot_spec.c)
 target_link_libraries(mxr_ik PUBLIC mujoco mxr_platform)
 
 # The portable tier. `src/` is only where these files live — what makes the
@@ -124,20 +151,27 @@ target_link_libraries(mxr_ik PUBLIC mujoco mxr_platform)
 #   does it.
 #
 # The SCAN below therefore covers strictly more than the compiled list: every
-# src/*.h, not just the three .cc. A header is where the link half is blind —
-# a `typedef VkFormat mxr_format_t` or an EGLDisplay in a signature emits no
-# symbol at all, so nothing fails to link, and src/mesh_buffers.h is exactly
-# the GPU-adjacent header that would carry one. Globbing the whole directory
-# also means a NEW core header is scanned the day it appears rather than the
-# day someone remembers to add it. src/mxr_log.h's guarded <android/log.h> is
-# not a false positive: android/ is a platform header, not a graphics or
-# runtime API, and is deliberately absent from the alternation.
+# src/*.h and every src/*.c, not just the three .cc. A header is where the link
+# half is blind — a `typedef VkFormat mxr_format_t` or an EGLDisplay in a
+# signature emits no symbol at all, so nothing fails to link, and
+# src/mesh_buffers.h is exactly the GPU-adjacent header that would carry one.
+# Globbing the directory also means a NEW core file is scanned the day it
+# appears rather than the day someone remembers to add it. src/mxr_log.h's
+# guarded <android/log.h> is not a false positive: android/ is a platform
+# header, not a graphics or runtime API, and is deliberately absent from the
+# alternation.
+#
+# The *.c glob closes a hole rather than tidying: src/ik_dls.c is in neither
+# MXR_CORE_SOURCES (it compiles into mxr_ik) nor the *.h glob, so it has never
+# been scanned — and src/robot_spec.c would have inherited that exemption on
+# the day it was added, along with the whole robot table.
 set(MXR_CORE_SOURCES
   src/teleop.cc
   src/sim_scene.cc
   src/mesh_buffers.cc)
 file(GLOB MXR_CORE_HEADERS CONFIGURE_DEPENDS
-     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
+     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
 foreach(core_src ${MXR_CORE_SOURCES} ${MXR_CORE_HEADERS})
   file(READ ${CMAKE_CURRENT_SOURCE_DIR}/${core_src} core_text)
   if(core_text MATCHES "#[ \t]*include[ \t]*[<\"](GLES|GL/|EGL/|KHR/|vulkan/|openxr/|emscripten/)")
@@ -180,45 +214,86 @@ if(NOT EMSCRIPTEN)
   target_link_libraries(testspeed PRIVATE mujoco Threads::Threads)
 endif()
 
-# The staged scene both teleop_replay and the web build load: ar_scene.xml
-# lives in assets/ and panda.xml in third_party/, and mj_loadXML resolves
-# `<include file="panda.xml"/>` and meshdir="assets" relative to the XML, so
-# they have to be co-located. The assets/ subdirectory is PRESERVED, not
-# flattened to basenames like the APK does — the APK gets away with that only
-# because mjVFS keys on basenames, and a real filesystem does not.
-set(MXR_MENAGERIE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/menagerie)
-set(MXR_SCENE_DIR ${CMAKE_CURRENT_BINARY_DIR}/franka)
+# The staged scenes both teleop_replay and the web build load: each
+# ar_scene.xml lives in assets/<id>/ and its robot in third_party/, and
+# mj_loadXML resolves `<include file="panda.xml"/>` and meshdir="assets"
+# relative to the XML, so they have to be co-located. The assets/
+# subdirectory is PRESERVED, not flattened to basenames like the APK does —
+# the APK gets away with that only because mjVFS keys on basenames, and a
+# real filesystem does not.
 #
-# file(COPY) runs at CONFIGURE time and nothing re-triggers configure on its
-# own, so without this line editing assets/ar_scene.xml leaves a stale copy
-# in the build tree and both teleop_replay and the browser silently keep
-# testing the old scene. Same shape as the POST_BUILD trap on shell.js
-# below. Only the first-party file is listed: the Menagerie tree is fetched,
-# not edited.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-             ${CMAKE_CURRENT_SOURCE_DIR}/assets/ar_scene.xml)
+# THE SCENE ID IS THE ONLY NAME. `<id>` is simultaneously the staging
+# directory below, the APK asset directory, the wasm MEMFS mount point, the
+# web `?scene=` token and the baselines/teleop-<id>-*.txt stem. It is
+# declared in exactly two places — mxr_stage_scene() here and MxrScene::id in
+# src/robot_spec.c — and SRC/ROBOT_SPEC.C IS AUTHORITATIVE: this file exists
+# to put the bytes where that file says they are. They cannot be checked
+# against each other at build time, so a disagreement surfaces at load as
+# mj_loadXML failing on a named path (mxr_last_error / logcat), which is the
+# reason the id travels as a string rather than an index.
+set(MXR_MENAGERIE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/menagerie)
+set(MXR_STAGE_ROOT ${CMAKE_CURRENT_BINARY_DIR})
+set(MXR_SCENE_IDS)
+
+# mxr_stage_scene(<id> <menagerie_dir> <file>...)
 #
 # The file list is explicit rather than a directory copy, because everything
 # staged here is also everything the browser downloads. Menagerie ships a
-# 2.2 MB panda.png screenshot and four mjx_* variants that this scene never
-# references; copying the directory wholesale put all of it on the wire and
-# cost 2.2 MB gzipped for a file nothing reads. LICENSE is not optional —
-# the model is Apache-2.0 and the NOTICE ships with it.
-if(EXISTS ${MXR_MENAGERIE}/franka_emika_panda/panda.xml)
-  file(COPY ${MXR_MENAGERIE}/franka_emika_panda/assets
-       DESTINATION ${MXR_SCENE_DIR})
-  file(COPY
-       ${MXR_MENAGERIE}/franka_emika_panda/panda.xml   # <- ar_scene includes
-       ${MXR_MENAGERIE}/franka_emika_panda/hand.xml    # <- panda.xml includes
-       ${MXR_MENAGERIE}/franka_emika_panda/scene.xml   # <- the baseline gate
-       ${MXR_MENAGERIE}/franka_emika_panda/LICENSE
-       ${CMAKE_CURRENT_SOURCE_DIR}/assets/ar_scene.xml
-       DESTINATION ${MXR_SCENE_DIR})
-else()
-  message(STATUS
-    "Franka scene not fetched — run scripts/fetch-menagerie.sh, then "
-    "re-run cmake. teleop_replay and the web asset bundle need it.")
-endif()
+# 2.2 MB panda.png screenshot and four mjx_* variants that the Franka scene
+# never references; copying the directory wholesale put all of it on the wire
+# and cost 2.2 MB gzipped for a file nothing reads. LICENSE is not optional —
+# the models are Apache-2.0 and the NOTICE ships with them.
+#
+# At least one file is required, and the FIRST must be the robot XML the
+# wrapper <include>s: it doubles as the fetch probe below.
+function(mxr_stage_scene id menagerie_dir)
+  set(dest ${MXR_STAGE_ROOT}/${id})
+  set(wrapper ${CMAKE_CURRENT_SOURCE_DIR}/assets/${id}/ar_scene.xml)
+  # file(COPY) runs at CONFIGURE time and nothing re-triggers configure on its
+  # own, so without this line editing a wrapper leaves a stale copy in the
+  # build tree and both teleop_replay and the browser silently keep testing
+  # the old scene. Same shape as the POST_BUILD trap on shell.js below. Only
+  # the first-party file is listed: the Menagerie tree is fetched, not edited.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${wrapper})
+  # Probe a staged FILE, not the directory. An interrupted or partial
+  # sparse-checkout leaves third_party/menagerie/<dir> present but short of its
+  # contents, and file(COPY) on a missing source is a hard CMake error — so the
+  # directory test turned the friendly "run scripts/fetch-menagerie.sh" message
+  # below into a stack of CMake errors in exactly the case it was written for.
+  list(GET ARGN 0 probe)
+  if(EXISTS ${MXR_MENAGERIE}/${menagerie_dir}/${probe})
+    file(COPY ${MXR_MENAGERIE}/${menagerie_dir}/assets DESTINATION ${dest})
+    set(staged)
+    foreach(f ${ARGN})
+      list(APPEND staged ${MXR_MENAGERIE}/${menagerie_dir}/${f})
+    endforeach()
+    file(COPY ${staged} ${wrapper} DESTINATION ${dest})
+    set(MXR_SCENE_IDS ${MXR_SCENE_IDS} ${id} PARENT_SCOPE)
+  else()
+    message(STATUS
+      "${id} scene not fetched (${MXR_MENAGERIE}/${menagerie_dir}/${probe} is "
+      "absent) — run scripts/fetch-menagerie.sh, then re-run cmake. "
+      "teleop_replay and the web asset bundle need it.")
+  endif()
+endfunction()
+
+# hand.xml is NOT here, and its removal is the reason to read this comment
+# rather than copy the shape below. It was staged under the note "<- panda.xml
+# includes", which is false: panda.xml contains no <include> at all (hand.xml
+# is a standalone gripper-only variant, a sibling of panda_nohand.xml). It was
+# reachable from nothing, and app/android/package-apk.sh never staged it — the
+# APK has always loaded without it. So it was 4 KB on the wire serving a
+# comment. Verified by the Franka trace gate, which is unmoved by dropping it.
+mxr_stage_scene(franka franka_emika_panda
+  panda.xml    # <- assets/franka/ar_scene.xml includes
+  scene.xml    # <- the `baseline` gate loads this one, not ar_scene.xml
+  LICENSE)
+
+# No scene.xml: `baseline` refuses a model with nu < 8 (bench/baseline.cc), so
+# nothing in the tree loads the SO101's, and everything staged is downloaded.
+mxr_stage_scene(so101 robotstudio_so101
+  so101.xml    # <- assets/so101/ar_scene.xml includes
+  LICENSE)
 
 # Everything above is the common prefix and builds in EVERY configuration —
 # deliberately not an else-branch, so nobody can turn this into
@@ -250,22 +325,41 @@ if(EMSCRIPTEN)
       -sINITIAL_MEMORY=256MB
       -sALLOW_MEMORY_GROWTH=1)
 
+  # Every staged scene is preloaded at its own id, so one wasm binary runs
+  # either gate: `node teleop_replay.js /franka/ar_scene.xml` and
+  # `/so101/ar_scene.xml` are the same command with a different argument.
+  #
+  # THE COST IS PAID THREE TIMES, not once: this list goes to `mxr`,
+  # `baseline` and `teleop_replay`, and each of the latter two loads exactly
+  # one scene per run. For the gate binaries that is only build-tree bytes on
+  # a developer machine — node reads the .data locally — so it buys the
+  # one-binary-per-target property cheaply. For `mxr` it is bytes on the wire
+  # into a headset browser, ~33 -> ~52 MB, and THAT is the one worth fixing;
+  # the per-scene fallback is deferred, deliberately, and noted below.
+  set(MXR_WASM_PRELOAD)
+  foreach(id ${MXR_SCENE_IDS})
+    list(APPEND MXR_WASM_PRELOAD
+         "SHELL:--preload-file ${MXR_STAGE_ROOT}/${id}@/${id}")
+  endforeach()
+
+  # `scene` is <id>/<file>: the ONE scene whose absence should stop the build
+  # rather than surface as a runtime open() failure inside node.
   function(mxr_wasm_cli target scene)
     target_link_options(${target} PRIVATE ${MXR_WASM_LINK_OPTIONS}
       -sEXIT_RUNTIME=1  # so main()'s return code reaches node
-      "SHELL:--preload-file ${MXR_SCENE_DIR}@/franka"
+      ${MXR_WASM_PRELOAD}
       # The references travel with the binary, so the gate is one command
       # with no host-filesystem access and no NODERAWFS.
       "SHELL:--preload-file ${CMAKE_CURRENT_SOURCE_DIR}/baselines@/baselines")
-    if(NOT EXISTS ${MXR_SCENE_DIR}/${scene})
+    if(NOT EXISTS ${MXR_STAGE_ROOT}/${scene})
       message(FATAL_ERROR
-        "${target} needs the staged scene at ${MXR_SCENE_DIR}/${scene} — run "
+        "${target} needs the staged scene at ${MXR_STAGE_ROOT}/${scene} — run "
         "scripts/fetch-menagerie.sh and re-run cmake.")
     endif()
   endfunction()
 
-  mxr_wasm_cli(baseline scene.xml)
-  mxr_wasm_cli(teleop_replay ar_scene.xml)
+  mxr_wasm_cli(baseline franka/scene.xml)
+  mxr_wasm_cli(teleop_replay franka/ar_scene.xml)
 
   # ---- the WebXR app ----
   # GLSL travels as a C string literal rather than a fetch: the shaders must
@@ -302,7 +396,12 @@ if(EMSCRIPTEN)
     # opaque framebuffer into Emscripten's object table. Exports are declared
     # by EMSCRIPTEN_KEEPALIVE at each definition, never listed here.
     "SHELL:-sEXPORTED_RUNTIME_METHODS=['cwrap','GL','HEAPF32','HEAP32']"
-    "SHELL:--preload-file ${MXR_SCENE_DIR}@/franka")
+    # Every scene, because the page cannot know which one will be picked. The
+    # cost is the whole catalogue on the wire before the menu is drawn (33 MB
+    # -> 51 MB for the second robot); a named per-scene fallback is ~8 lines
+    # of `foreach` here plus a fetch in shell.js, deferred until someone
+    # measures a load on a headset browser.
+    ${MXR_WASM_PRELOAD})
   set_target_properties(mxr PROPERTIES OUTPUT_NAME mxr SUFFIX ".js")
 
   # The page and the shell sit beside the generated mxr.js so the whole web

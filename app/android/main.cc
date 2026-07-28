@@ -18,6 +18,7 @@
 #include "assets.h"
 #include "mxr_error.h"
 #include "mxr_log.h"
+#include "robot_spec.h"
 #include "scene_renderer.h"
 #include "sim_scene.h"
 #include "vk_context.h"
@@ -78,12 +79,76 @@ void android_main(android_app* app) {
 
   // Model + scene extraction + renderer. A load failure degrades to a
   // clear-color loop so the failure is visible (and logged) in-headset.
-  mjModel* model = mxr_load_model_from_assets(app->activity->assetManager);
+  mjModel* model = nullptr;
   mjData* data = nullptr;
   SceneRenderer renderer;
   SimScene sim;
   bool scene_ready = false;
-  if (model) {
+  int scene_index = 0;
+
+  // THE SCENE SWAP, in process. Used once at startup and again on every B
+  // press. There is no in-headset menu and there cannot be one: this stack
+  // has no text rendering, so there is nothing to draw a menu WITH. The app
+  // starts on the first scene in src/robot_spec.c and B cycles to the next.
+  //
+  // The teardown order is EndSession -> SimScene::Destroy ->
+  // SceneRenderer::Destroy -> mj_deleteData -> mj_deleteModel.
+  //
+  // BE HONEST ABOUT WHY: as written today, none of the first three
+  // dereferences the mjModel, so none of them is a use-after-free waiting to
+  // happen. EndSession reaches only Teleop::Disengage(), which is
+  // `engaged_ = false`; mjv_freeScene frees the mjvScene's own arrays and
+  // never reads the model it was sized from; SceneRenderer::Destroy touches
+  // only Vulkan handles. The order is DISCIPLINE, not repair — it keeps
+  // "every step runs while the scene it belongs to still exists" true by
+  // construction, so that the day EndSession grows a settle step or Destroy
+  // grows a log of the final pose, this code is already right. Do not read
+  // the order as evidence that a use-after-free was found here.
+  //
+  // THE ONE STEP THAT IS LOAD-BEARING TODAY is inside SceneRenderer::Destroy,
+  // and it is a GPU synchronisation rather than a CPU ordering. See the
+  // comment above that function: VkContext::SubmitAndWait does not wait
+  // despite its name, so the previous frame's command buffer may still be
+  // executing when B is pressed.
+  //
+  // Chosen over shipping two launcher icons, which is MEASURED DEAD: two
+  // <activity android:name="android.app.NativeActivity"> entries link and
+  // install, but they collapse to one ComponentName, so only one is ever
+  // resolved. Distinguishing them needs a NativeActivity subclass, which
+  // needs Java, which ends android:hasCode="false". The tiebreaker is the
+  // failure shape: the launcher approach fails at INSTALL, with no path to
+  // any robot, while this one fails only if you press B.
+  auto load_scene = [&](int index) {
+    // The ONLY range check on the scene index — the B-cycle above wraps
+    // through mxr_scene_at rather than carrying its own bound.
+    const MxrScene* scene = mxr_scene_at(index);
+    if (!scene) {
+      LOGE("no scene at index %d", index);
+      return;
+    }
+    sim.EndSession();
+    sim.Destroy();
+    renderer.Destroy();
+    if (data) {
+      mj_deleteData(data);
+      data = nullptr;
+    }
+    if (model) {
+      mj_deleteModel(model);
+      model = nullptr;
+    }
+    scene_ready = false;
+
+    // The one line that answers "which robot am I on" from `adb logcat`.
+    // With no font and no 2D surface anywhere in this tree, recognising the
+    // arm by sight is otherwise the only readout, and that assumes the
+    // reader already knows both robots.
+    LOGI("scene: %s (%s), %d of %d", scene->label, scene->id, index + 1,
+         mxr_scene_count());
+    model = mxr_load_model_from_assets(app->activity->assetManager, scene->id);
+    if (!model) {
+      return;  // clear-color loop; assets.cc has already named the directory
+    }
     data = mj_makeData(model);
     scene_ready = renderer.Create(&vk, model);
     if (scene_ready) {
@@ -95,7 +160,12 @@ void android_main(android_app* app) {
     } else {
       LOGE("renderer creation failed; clear-color only");
     }
-  }
+  };
+  load_scene(scene_index);
+
+  // B is a raw level; the edge is derived here. Starts true so a B already
+  // held as the session comes up cannot cycle the scene on frame one.
+  bool b_prev = true;
   // Absolute display time in nanoseconds, converted to seconds exactly once,
   // right here. The int64 epoch is subtracted BEFORE the conversion:
   // predictedDisplayTime is ~1e18 ns, and a*1e-9 - b*1e-9 is not the same
@@ -149,6 +219,20 @@ void android_main(android_app* app) {
       continue;
     }
     xr.SyncInput(frame_state.predictedDisplayTime, &input);
+
+    // Scene cycle, before Advance so the new model is the one stepped this
+    // frame rather than the old one being stepped and then thrown away.
+    const bool b_now = xr.b_down();
+    if (b_now && !b_prev) {
+      // Wrap by ASKING THE TABLE rather than by `% mxr_scene_count()`: the
+      // modulo is undefined on an empty table, which made load_scene's
+      // range guard the only one of the two that could not fire. Now there
+      // is one bound, mxr_scene_at's documented NULL, and an empty table
+      // degrades to that guard's log line instead of a divide.
+      scene_index = mxr_scene_at(scene_index + 1) ? scene_index + 1 : 0;
+      load_scene(scene_index);
+    }
+    b_prev = b_now;
 
     if (time_epoch == 0) {
       time_epoch = frame_state.predictedDisplayTime;
