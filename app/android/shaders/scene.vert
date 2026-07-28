@@ -1,13 +1,13 @@
 #version 450
 // MuJoCoXR scene shader: one pipeline for MESH / BOX. Geometry is in
-// MuJoCo world space; eye.viewproj already folds in stage_T_world and the
+// MuJoCo world space; eye.viewproj already folds in xr_from_mj and the
 // XrView pose/fov (mjvGLCamera is bypassed by design).
 
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec3 in_normal;
 
 layout(set = 0, binding = 0) uniform Eye {
-  mat4 viewproj;    // P * V * stage_T_world
+  mat4 viewproj;    // P * V * xr_from_mj
   vec4 light_dir;   // world-space travel direction of the one light
 } eye;
 

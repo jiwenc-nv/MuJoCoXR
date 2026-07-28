@@ -25,6 +25,18 @@ bool Teleop::Init(const mjModel* m, const mjData* d) {
   if (gripper_act_ < 0 && m->nu > IK_NARM) {
     gripper_act_ = IK_NARM;  // 8th actuator by position
   }
+  // The 255 below is a per-model remap (panda.xml:275 says so in its own
+  // comment). Assert it rather than deriving it: actuator_ctrlrange supplies
+  // the scale but not the polarity, and Menagerie's Robotiq 2F-85 is also
+  // 0..255 with 0 = OPEN. Without this the failure is silent — MuJoCo clamps
+  // and the gripper simply never closes.
+  if (gripper_act_ >= 0) {
+    const mjtNum* r = m->actuator_ctrlrange + 2*gripper_act_;
+    if (r[0] != 0.0 || r[1] != 255.0) {
+      LOGW("gripper ctrlrange is (%g, %g), not (0, 255): the 255*(1-trigger) "
+           "mapping below is wrong for this model", r[0], r[1]);
+    }
+  }
   ik_dls_tcp(&ik_, d, target_pos_, target_quat_);
   return true;
 }
@@ -40,33 +52,54 @@ void Teleop::Reset(const mjModel* m, mjData* d) {
   LOGI("teleop: home reset");
 }
 
-void Teleop::Update(const mjModel* m, mjData* d, const XrInputState& input,
+void Teleop::Update(const mjModel* m, mjData* d, const InputState& input,
                     double dt) {
   ++frame_;
-  if (input.a_click) {
+  // A is reported as a raw level; the edge is derived here so both shells
+  // share one definition. Suppressed on the first frame so a button already
+  // held at session start does not fire a reset.
+  const bool a_edge = input.a_down && !a_down_prev_ && frame_ > 1;
+  a_down_prev_ = input.a_down;
+  if (a_edge) {
     Reset(m, d);
   }
 
+  // recenter_edge is a shell-latched one-frame event. A shell that wired a
+  // level here would keep the clutch permanently disengaged with nothing
+  // logged; this turns that into a named diagnosis.
+  if (input.recenter_edge) {
+    if (++recenter_run_ == 4) {
+      LOGW("recenter_edge asserted 4 frames running — the shell is reporting "
+           "a level, not an edge");
+    }
+  } else {
+    recenter_run_ = 0;
+  }
+
   // Gripper is direct: inverted range, 255 = open per the home keyframe.
+  // bench/excitation.h:27 carries a line that looks identical to the one
+  // below and must NOT be unified with it — `t` here is float and `close`
+  // there is double, so the two round differently, and the recorded
+  // baseline was taken through that one. The warning lives there.
   if (gripper_act_ >= 0) {
     float t = input.trigger < 0 ? 0 : (input.trigger > 1 ? 1 : input.trigger);
     d->ctrl[gripper_act_] = 255.0*(1.0 - t);
   }
 
-  if (input.recenter || !input.grip_valid) {
+  if (input.recenter_edge || !input.grip_valid) {
     // Recenter moves the reference space under the controller; lost tracking
     // jumps the pose on regain. Either way: drop the clutch, hold the target.
     if (engaged_) {
       LOGI("teleop: clutch auto-disengaged (%s)",
-           input.recenter ? "recenter" : "tracking lost");
+           input.recenter_edge ? "recenter" : "tracking lost");
     }
     engaged_ = false;
   } else {
     // Controller pose into MuJoCo world before any delta is formed (a delta
-    // formed in stage space differs by conjugation with q_ws).
+    // formed in the XR reference space differs by conjugation with R).
     mjtNum p_c[3], q_c[4];
-    mxr_pos_xr_to_mj(&input.grip.position, p_c);
-    mxr_quat_xr_to_mj(&input.grip.orientation, q_c);
+    mxr_pos_mj_from_xr(input.grip_pos, p_c);
+    mxr_quat_mj_from_xr(input.grip_quat, q_c);
 
     if (!engaged_ && input.squeeze > kEngageThreshold) {
       engaged_ = true;

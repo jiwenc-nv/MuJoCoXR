@@ -2,12 +2,12 @@
 // MESH + BOX only (planes are skipped — the AR background is passthrough),
 // one pipeline, push constants, one hardcoded directional light, no
 // textures/shadows/sorting. View/projection come exclusively from XrView
-// pose + XrFovf; mjvGLCamera is bypassed. Meshes are de-indexed at load by
-// welding unique (vertex, normal) index pairs — mesh_facenormal indexes
-// normals separately from vertices.
+// pose + XrFovf; mjvGLCamera is bypassed. The vertex/index buffers and the
+// appearance constants come from src/mesh_buffers.h so this renderer and its
+// WebGL2 twin draw the same pixels; everything below is Vulkan-only.
 
-#ifndef MUJOCOXR_APP_SCENE_RENDERER_H_
-#define MUJOCOXR_APP_SCENE_RENDERER_H_
+#ifndef MUJOCOXR_APP_ANDROID_SCENE_RENDERER_H_
+#define MUJOCOXR_APP_ANDROID_SCENE_RENDERER_H_
 
 #include <vulkan/vulkan.h>
 
@@ -18,12 +18,14 @@
 #include <cstdint>
 #include <vector>
 
+#include "mesh_buffers.h"
+
 class VkContext;
 
 class SceneRenderer {
  public:
   bool Create(VkContext* vk, const mjModel* m);
-  // Computes P(fov) * V(pose)^-1 * stage_T_world and writes the eye's UBO.
+  // Computes P(fov) * V(pose)^-1 * xr_from_mj and writes the eye's UBO.
   void SetEye(int eye, const XrPosef& view_pose, const XrFovf& fov);
   // Records draws for every renderable geom in the scene, in scene order
   // (app-appended decor geoms land last: marker/gizmo over the robot).
@@ -31,12 +33,6 @@ class SceneRenderer {
   void Destroy();
 
  private:
-  struct MeshRange {
-    int32_t base_vertex = 0;
-    uint32_t first_index = 0;
-    uint32_t index_count = 0;
-  };
-
   bool CreatePipeline();
   bool UploadGeometry(const mjModel* m);
 
@@ -56,7 +52,7 @@ class SceneRenderer {
 
   MeshRange box_range_;
   std::vector<MeshRange> mesh_ranges_;  // per meshid
-  float stage_from_world_[16] = {0};
+  float xr_from_mj_[16] = {0};
 };
 
-#endif  // MUJOCOXR_APP_SCENE_RENDERER_H_
+#endif  // MUJOCOXR_APP_ANDROID_SCENE_RENDERER_H_

@@ -1,31 +1,27 @@
-// Route MuJoCo errors/warnings to stderr (host) and logcat (device).
-// Must be installed before the first MuJoCo call.
+// Route MuJoCo's own errors/warnings into the app's log. Must be installed
+// before the first MuJoCo call.
+//
+// Goes through mxr_log.h rather than carrying its own __ANDROID__ split:
+// that header claims to be the one logging surface for every target, and a
+// second copy of the target split plus a second copy of the tag string, one
+// file over, is exactly what would falsify it.
 
 #ifndef MUJOCOXR_SRC_MXR_ERROR_H_
 #define MUJOCOXR_SRC_MXR_ERROR_H_
 
-#include <stdio.h>
 #include <stdlib.h>
 
 #include <mujoco/mujoco.h>
 
-#ifdef __ANDROID__
-#include <android/log.h>
-#endif
+#include "mxr_log.h"
 
 static inline void mxr_handle_error(const char* msg) {
-#ifdef __ANDROID__
-  __android_log_print(ANDROID_LOG_ERROR, "mujocoxr", "MuJoCo error: %s", msg);
-#endif
-  fprintf(stderr, "MuJoCo error: %s\n", msg);
+  LOGE("MuJoCo error: %s", msg);
   abort();  // mju_user_error must not return
 }
 
 static inline void mxr_handle_warning(const char* msg) {
-#ifdef __ANDROID__
-  __android_log_print(ANDROID_LOG_WARN, "mujocoxr", "MuJoCo warning: %s", msg);
-#endif
-  fprintf(stderr, "MuJoCo warning: %s\n", msg);
+  LOGW("MuJoCo warning: %s", msg);
 }
 
 static inline void mxr_install_error_hooks(void) {

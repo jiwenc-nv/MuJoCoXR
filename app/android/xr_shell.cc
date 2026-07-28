@@ -490,7 +490,7 @@ void XrShell::HandleSessionStateChange(
   }
 }
 
-void XrShell::PollEvents(bool* exit_render_loop, XrInputState* input) {
+void XrShell::PollEvents(bool* exit_render_loop, InputState* input) {
   while (true) {
     XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
     if (xrPollEvent(instance_, &ev) != XR_SUCCESS) {
@@ -509,7 +509,7 @@ void XrShell::PollEvents(bool* exit_render_loop, XrInputState* input) {
         // Recentering mid-clutch causes a controller-pose jump; teleop
         // auto-disengages on this flag.
         if (input) {
-          input->recenter = true;
+          input->recenter_edge = true;
         }
         LOGI("reference space change pending (recenter)");
         break;
@@ -592,9 +592,9 @@ bool XrShell::EndFrame(
   return XrOk(xrEndFrame(session_, &info), "xrEndFrame");
 }
 
-void XrShell::SyncInput(XrTime time, XrInputState* input) {
+void XrShell::SyncInput(XrTime time, InputState* input) {
   input->grip_valid = false;
-  input->a_click = false;
+  input->a_down = false;
   ++sync_count_;
 
   XrActiveActionSet active{action_set_, XR_NULL_PATH};
@@ -621,7 +621,16 @@ void XrShell::SyncInput(XrTime time, XrInputState* input) {
           XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
       if ((loc.locationFlags & kValid) == kValid) {
         input->grip_valid = true;
-        input->grip = loc.pose;
+        // Field by field, never memcpy: XrPosef is {orientation, position}
+        // — orientation FIRST — while InputState leads with position. A
+        // memcpy compiles and is silently wrong.
+        input->grip_quat[0] = loc.pose.orientation.x;
+        input->grip_quat[1] = loc.pose.orientation.y;
+        input->grip_quat[2] = loc.pose.orientation.z;
+        input->grip_quat[3] = loc.pose.orientation.w;
+        input->grip_pos[0] = loc.pose.position.x;
+        input->grip_pos[1] = loc.pose.position.y;
+        input->grip_pos[2] = loc.pose.position.z;
         hand = h;
       }
     }
@@ -647,7 +656,16 @@ void XrShell::SyncInput(XrTime time, XrInputState* input) {
   XrActionStateBoolean b{XR_TYPE_ACTION_STATE_BOOLEAN};
   if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &get, &b)) &&
       b.isActive) {
-    input->a_click = b.currentState && b.changedSinceLastSync;
+    // Raw level; Teleop derives the edge. Equivalent to the previous
+    // `currentState && changedSinceLastSync` ON THIS SIDE of the ABI,
+    // because xrSyncActions runs exactly once per frame, so `changed` was
+    // already a level diff against the previous frame.
+    //
+    // Composed with the core, ONE frame differs and does so deliberately:
+    // with A already held at session start the old code fired a reset on
+    // frame 1, and Teleop::Update's `frame_ > 1` now suppresses it. Better,
+    // but not "bit-identical" — say which, rather than claim identity.
+    input->a_down = b.currentState;
   }
 
   if (sync_count_ % 90 == 0) {

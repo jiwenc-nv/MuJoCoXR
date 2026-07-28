@@ -2,9 +2,9 @@
 
 #include <cmath>
 #include <cstring>
-#include <unordered_map>
 
 #include "frames.h"
+#include "mesh_buffers.h"
 #include "mxr_log.h"
 #include "vk_context.h"
 
@@ -12,15 +12,6 @@
 #include "shaders/scene.vert.spv.h"
 
 namespace {
-
-constexpr float kNearZ = 0.05f;
-constexpr float kFarZ = 50.0f;
-const float kLightDirWorld[3] = {0.35f, -0.25f, -1.0f};  // one light, fixed
-
-struct Vertex {
-  float pos[3];
-  float normal[3];
-};
 
 // 128 bytes — the Vulkan-guaranteed push constant budget, used exactly.
 struct PushConstants {
@@ -50,6 +41,10 @@ void Mat4Mul(float out[16], const float a[16], const float b[16]) {
 }
 
 // Vulkan-convention projection (y-down clip, depth 0..1) from an XrFovf.
+// There is deliberately no WebXR sibling for this: WebXR hands over
+// XRView.projectionMatrix already built, in GL convention. Promoting this
+// into the shared tier "for symmetry" would silently invert y and remap
+// depth on whichever target did not build it.
 void ProjFromFov(const XrFovf& fov, float out[16]) {
   const float tl = tanf(fov.angleLeft);
   const float tr = tanf(fov.angleRight);
@@ -105,7 +100,7 @@ VkShaderModule MakeShaderModule(VkDevice dev, const uint32_t* code,
 
 bool SceneRenderer::Create(VkContext* vk, const mjModel* m) {
   vk_ = vk;
-  mxr_stage_from_world(stage_from_world_);
+  mxr_mat4_xr_from_mj(xr_from_mj_);
   if (!UploadGeometry(m)) {
     return false;
   }
@@ -155,79 +150,13 @@ bool SceneRenderer::Create(VkContext* vk, const mjModel* m) {
 }
 
 bool SceneRenderer::UploadGeometry(const mjModel* m) {
-  std::vector<Vertex> verts;
-  std::vector<uint32_t> indices;
+  MeshBuffers mb;
+  BuildMeshBuffers(m, &mb);
+  box_range_ = mb.box;
+  mesh_ranges_ = mb.meshes;
 
-  // Unit box: 6 faces x 4 verts, half-extent 1.
-  box_range_.base_vertex = static_cast<int32_t>(verts.size());
-  box_range_.first_index = static_cast<uint32_t>(indices.size());
-  const float bn[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                          {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-  const float bu[6][3] = {{0, 1, 0}, {0, 1, 0},  {0, 0, 1},
-                          {0, 0, 1}, {1, 0, 0},  {1, 0, 0}};
-  uint32_t box_base = 0;
-  for (int f = 0; f < 6; ++f) {
-    float v[3];  // bv = n x u
-    v[0] = bn[f][1]*bu[f][2] - bn[f][2]*bu[f][1];
-    v[1] = bn[f][2]*bu[f][0] - bn[f][0]*bu[f][2];
-    v[2] = bn[f][0]*bu[f][1] - bn[f][1]*bu[f][0];
-    for (int i = 0; i < 4; ++i) {
-      const float su = (i == 1 || i == 2) ? 1.0f : -1.0f;
-      const float sv = (i >= 2) ? 1.0f : -1.0f;
-      Vertex vert;
-      for (int k = 0; k < 3; ++k) {
-        vert.pos[k] = bn[f][k] + su*bu[f][k] + sv*v[k];
-        vert.normal[k] = bn[f][k];
-      }
-      verts.push_back(vert);
-    }
-    const uint32_t b = box_base + 4*f;
-    indices.insert(indices.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
-  }
-  box_range_.index_count =
-      static_cast<uint32_t>(indices.size()) - box_range_.first_index;
-
-  // Meshes: weld unique (vertex, normal) index pairs per mesh — normals are
-  // indexed separately from vertices (mesh_facenormal vs mesh_face).
-  mesh_ranges_.resize(m->nmesh);
-  std::unordered_map<uint64_t, uint32_t> weld;
-  for (int mesh = 0; mesh < m->nmesh; ++mesh) {
-    weld.clear();
-    auto& range = mesh_ranges_[mesh];
-    range.base_vertex = static_cast<int32_t>(verts.size());
-    range.first_index = static_cast<uint32_t>(indices.size());
-    const float* mverts = m->mesh_vert + 3*m->mesh_vertadr[mesh];
-    const float* mnormals = m->mesh_normal + 3*m->mesh_normaladr[mesh];
-    const int faceadr = m->mesh_faceadr[mesh];
-    uint32_t local_count = 0;
-    for (int f = 0; f < m->mesh_facenum[mesh]; ++f) {
-      for (int k = 0; k < 3; ++k) {
-        const uint32_t vi = m->mesh_face[3*(faceadr + f) + k];
-        const uint32_t ni = m->mesh_facenormal[3*(faceadr + f) + k];
-        const uint64_t key = (static_cast<uint64_t>(vi) << 32) | ni;
-        auto it = weld.find(key);
-        uint32_t idx;
-        if (it != weld.end()) {
-          idx = it->second;
-        } else {
-          idx = local_count++;
-          weld.emplace(key, idx);
-          Vertex v;
-          memcpy(v.pos, mverts + 3*vi, sizeof(v.pos));
-          memcpy(v.normal, mnormals + 3*ni, sizeof(v.normal));
-          verts.push_back(v);
-        }
-        indices.push_back(idx);
-      }
-    }
-    range.index_count =
-        static_cast<uint32_t>(indices.size()) - range.first_index;
-  }
-  LOGI("geometry: %zu vertices, %zu indices, %ld meshes", verts.size(),
-       indices.size(), static_cast<long>(m->nmesh));
-
-  const VkDeviceSize vsize = verts.size()*sizeof(Vertex);
-  const VkDeviceSize isize = indices.size()*sizeof(uint32_t);
+  const VkDeviceSize vsize = mb.verts.size()*sizeof(Vertex);
+  const VkDeviceSize isize = mb.indices.size()*sizeof(uint32_t);
   const VkMemoryPropertyFlags host_props =
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   if (!vk_->CreateBuffer(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, host_props,
@@ -238,10 +167,10 @@ bool SceneRenderer::UploadGeometry(const mjModel* m) {
   }
   void* map = nullptr;
   vkMapMemory(vk_->device(), vmem_, 0, vsize, 0, &map);
-  memcpy(map, verts.data(), vsize);
+  memcpy(map, mb.verts.data(), vsize);
   vkUnmapMemory(vk_->device(), vmem_);
   vkMapMemory(vk_->device(), imem_, 0, isize, 0, &map);
-  memcpy(map, indices.data(), isize);
+  memcpy(map, mb.indices.data(), isize);
   vkUnmapMemory(vk_->device(), imem_);
   return true;
 }
@@ -388,7 +317,7 @@ void SceneRenderer::SetEye(int eye, const XrPosef& view_pose,
   ViewFromPose(view_pose, view);
   Mat4Mul(pv, proj, view);
   EyeUbo ubo;
-  Mat4Mul(ubo.viewproj, pv, stage_from_world_);
+  Mat4Mul(ubo.viewproj, pv, xr_from_mj_);
   const float len = sqrtf(kLightDirWorld[0]*kLightDirWorld[0] +
                           kLightDirWorld[1]*kLightDirWorld[1] +
                           kLightDirWorld[2]*kLightDirWorld[2]);

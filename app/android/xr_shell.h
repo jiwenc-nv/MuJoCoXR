@@ -4,8 +4,8 @@
 // LOCAL_FLOOR reference space (fallback STAGE -> LOCAL), one action set on
 // the right Touch controller (grip pose, trigger, squeeze, A; B unbound).
 
-#ifndef MUJOCOXR_APP_XR_SHELL_H_
-#define MUJOCOXR_APP_XR_SHELL_H_
+#ifndef MUJOCOXR_APP_ANDROID_XR_SHELL_H_
+#define MUJOCOXR_APP_ANDROID_XR_SHELL_H_
 
 #include <jni.h>
 #include <vulkan/vulkan.h>
@@ -18,17 +18,9 @@
 #include <cstdint>
 #include <vector>
 
-struct android_app;
+#include "frames.h"
 
-// Controller state sampled once per frame via xrSyncActions.
-struct XrInputState {
-  bool grip_valid = false;
-  XrPosef grip = {{0, 0, 0, 1}, {0, 0, 0}};  // in the app reference space
-  float trigger = 0;
-  float squeeze = 0;
-  bool a_click = false;    // rising edge this frame
-  bool recenter = false;   // XrEventDataReferenceSpaceChangePending this frame
-};
+struct android_app;
 
 struct SwapchainInfo {
   XrSwapchain handle = XR_NULL_HANDLE;
@@ -58,8 +50,11 @@ class XrShell {
   bool CreateSwapchains(const std::vector<int64_t>& preferred);
   bool CreateActions();
 
-  // Session-state machine; sets *exit_render_loop / *request_restart.
-  void PollEvents(bool* exit_render_loop, XrInputState* input);
+  // Session-state machine; sets *exit_render_loop. Also latches
+  // input->recenter_edge from XrEventDataReferenceSpaceChangePending, which
+  // is why it takes the input struct at all — that field is the one piece of
+  // InputState that does not come from xrSyncActions.
+  void PollEvents(bool* exit_render_loop, InputState* input);
 
   bool session_running() const { return session_running_; }
   XrInstance instance() const { return instance_; }
@@ -79,7 +74,8 @@ class XrShell {
   bool ReleaseSwapchainImage(int view);
   bool EndFrame(const XrFrameState& frame_state,
                 const std::vector<XrCompositionLayerProjectionView>& proj_views);
-  void SyncInput(XrTime time, XrInputState* input);
+  // Fills every InputState field except recenter_edge (see PollEvents).
+  void SyncInput(XrTime time, InputState* input);
 
   void Destroy();
 
@@ -115,4 +111,4 @@ class XrShell {
   int64_t sync_count_ = 0;
 };
 
-#endif  // MUJOCOXR_APP_XR_SHELL_H_
+#endif  // MUJOCOXR_APP_ANDROID_XR_SHELL_H_

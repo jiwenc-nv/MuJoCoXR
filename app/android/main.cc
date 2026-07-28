@@ -1,9 +1,13 @@
-// MuJoCoXR NativeActivity entry point: raw OpenXR + Vulkan, unmodified
-// Menagerie Franka scene, clutched DLS teleop from the right Touch
-// controller. One xrWaitFrame-paced loop (single-threaded by decision):
-// sync actions -> locate grip -> clutch/IK -> accumulator-owed mj_steps
-// (catch-up capped at ~2 frames, deficit logged) -> mjv_updateScene +
-// decor -> two eye passes. Sim time tracks display time; no interpolation.
+// MuJoCoXR NativeActivity entry point: the OpenXR + Vulkan half of the app,
+// and nothing else. One xrWaitFrame-paced loop (single-threaded by
+// decision): drain lifecycle events -> poll/sync input into an InputState ->
+// SimScene::Advance -> if the runtime will present this frame,
+// SimScene::Compose and two eye passes.
+//
+// What the robot does lives in src/sim_scene.cc, shared with the WebXR
+// shell. The only physics-adjacent decision left here is the one the core
+// cannot see: predictedDisplayTime is this shell's latched clock, and the
+// nanosecond -> second conversion happens exactly once, below.
 
 #include <android_native_app_glue.h>
 
@@ -15,7 +19,7 @@
 #include "mxr_error.h"
 #include "mxr_log.h"
 #include "scene_renderer.h"
-#include "teleop.h"
+#include "sim_scene.h"
 #include "vk_context.h"
 #include "xr_shell.h"
 
@@ -24,20 +28,6 @@ namespace {
 struct AppState {
   bool resumed = false;
 };
-
-// World-axes gizmo decor: the handedness gate checks each axis on-device (+x red,
-// +y green, +z blue) before any teleop math is trusted.
-void AppendAxesGizmo(mjvScene* scn) {
-  const mjtNum sizes[3][3] = {
-      {0.4, 0.012, 0.012}, {0.012, 0.4, 0.012}, {0.012, 0.012, 0.4}};
-  const mjtNum poses[3][3] = {{0.4, 0, 0.02}, {0, 0.4, 0.02}, {0, 0, 0.42}};
-  const float rgba[3][4] = {
-      {1, 0.2f, 0.2f, 1}, {0.2f, 1, 0.2f, 1}, {0.25f, 0.45f, 1, 1}};
-  for (int i = 0; i < 3 && scn->ngeom < scn->maxgeom; ++i) {
-    mjv_initGeom(scn->geoms + scn->ngeom++, mjGEOM_BOX, sizes[i], poses[i],
-                 nullptr, rgba[i]);
-  }
-}
 
 void OnAppCmd(android_app* app, int32_t cmd) {
   auto* state = static_cast<AppState*>(app->userData);
@@ -90,33 +80,34 @@ void android_main(android_app* app) {
   // clear-color loop so the failure is visible (and logged) in-headset.
   mjModel* model = mxr_load_model_from_assets(app->activity->assetManager);
   mjData* data = nullptr;
-  mjvScene scene;
-  mjv_defaultScene(&scene);
-  mjvOption vis_opt;
-  mjvCamera cam;
   SceneRenderer renderer;
+  SimScene sim;
   bool scene_ready = false;
   if (model) {
     data = mj_makeData(model);
-    int home = mj_name2id(model, mjOBJ_KEY, "home");
-    if (home >= 0) {
-      mj_resetDataKeyframe(model, data, home);
-    }
-    mj_forward(model, data);
-    mjv_defaultOption(&vis_opt);  // groups 0-2 visible: collision hidden
-    mjv_defaultFreeCamera(model, &cam);
-    mjv_makeScene(model, &scene, 1000);
     scene_ready = renderer.Create(&vk, model);
-    if (!scene_ready) {
+    if (scene_ready) {
+      // TODO: physics is gated on renderer creation, so a Vulkan failure
+      // stops the simulation as well as the picture. Pre-existing (this was
+      // `teleop_ready = scene_ready && teleop.Init(...)`); preserved
+      // verbatim rather than fixed inside a refactor.
+      sim.Init(model, data, "XrFrameState::predictedDisplayTime");
+    } else {
       LOGE("renderer creation failed; clear-color only");
     }
   }
-  Teleop teleop;
-  bool teleop_ready = scene_ready && teleop.Init(model, data);
-  double sim_accum = 0;
-  XrTime last_display_time = 0;
+  // Absolute display time in nanoseconds, converted to seconds exactly once,
+  // right here. The int64 epoch is subtracted BEFORE the conversion:
+  // predictedDisplayTime is ~1e18 ns, and a*1e-9 - b*1e-9 is not the same
+  // double as (a-b)*1e-9. This makes the dt the core derives accurate, not
+  // exact — (t3-e)*1e-9 - (t2-e)*1e-9 is still a difference of two rounded
+  // doubles, ~1e-13 s once a session has been up for hours. That is 7 orders
+  // below one 72 Hz frame and does not accumulate, because the accumulator
+  // keeps its sub-timestep residual.
+  XrTime time_epoch = 0;
 
   bool exit_loop = false;
+  bool session_was_running = false;
   int64_t frame_count = 0;
   while (!app->destroyRequested && !exit_loop) {
     // Drain Android lifecycle events; block when idle (no session).
@@ -134,11 +125,24 @@ void android_main(android_app* app) {
       timeout = 0;
     }
 
-    XrInputState input;
+    InputState input;
     xr.PollEvents(&exit_loop, &input);
     if (!xr.session_running()) {
+      // The session-end transition, which the core owns. Without this the
+      // loop merely `continue`d, so an HMD sleep/wake mid-clutch resumed
+      // with engaged_ still true over a p_c0_ from before the sleep, and
+      // with last_display_s_ from before it too — one clamped 0.1 s dt and
+      // a `sim deficit` line on the first resumed frame. session_running_
+      // is cleared only on STOPPING / EXITING / LOSS_PENDING
+      // (xr_shell.cc:475-486), never by VISIBLE/SYNCHRONIZED, so this edge
+      // fires once per real session end and not on focus changes.
+      if (session_was_running) {
+        session_was_running = false;
+        sim.EndSession();
+      }
       continue;
     }
+    session_was_running = true;
 
     XrFrameState frame_state;
     if (!xr.WaitBeginFrame(&frame_state)) {
@@ -146,55 +150,25 @@ void android_main(android_app* app) {
     }
     xr.SyncInput(frame_state.predictedDisplayTime, &input);
 
-    // Frame dt from predicted display times; first frame steps nothing.
-    double dt_frame = 0;
-    if (last_display_time != 0) {
-      dt_frame = (frame_state.predictedDisplayTime - last_display_time)*1e-9;
-      dt_frame = dt_frame < 0 ? 0 : (dt_frame > 0.1 ? 0.1 : dt_frame);
+    if (time_epoch == 0) {
+      time_epoch = frame_state.predictedDisplayTime;
     }
-    last_display_time = frame_state.predictedDisplayTime;
-
-    if (teleop_ready) {
-      teleop.Update(model, data, input, dt_frame);
-      // Accumulator-owed fixed steps; catch-up capped at ~2 frames of work.
-      sim_accum += dt_frame;
-      const double timestep = model->opt.timestep;
-      int owed = static_cast<int>(sim_accum/timestep);
-      const int cap = static_cast<int>(2.0*0.014/timestep) + 1;
-      if (owed > cap) {
-        LOGW("sim deficit: dropping %d steps", owed - cap);
-        owed = cap;
-        sim_accum = 0;
-      } else {
-        sim_accum -= owed*timestep;
-      }
-      for (int s = 0; s < owed; ++s) {
-        mj_step(model, data);
-      }
-    }
+    sim.Advance(input,
+                (frame_state.predictedDisplayTime - time_epoch)*1e-9);
 
     if (++frame_count % 72 == 0 && input.grip_valid) {
       LOGI("grip p=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f) trig=%.2f "
            "sqz=%.2f",
-           input.grip.position.x, input.grip.position.y,
-           input.grip.position.z, input.grip.orientation.x,
-           input.grip.orientation.y, input.grip.orientation.z,
-           input.grip.orientation.w, input.trigger, input.squeeze);
+           input.grip_pos[0], input.grip_pos[1], input.grip_pos[2],
+           input.grip_quat[0], input.grip_quat[1], input.grip_quat[2],
+           input.grip_quat[3], input.trigger, input.squeeze);
     }
 
     std::vector<XrCompositionLayerProjectionView> proj_views;
     if (frame_state.shouldRender) {
       std::vector<XrView> views;
       if (xr.LocateViews(frame_state.predictedDisplayTime, &views)) {
-        if (scene_ready) {
-          // Abstract scene extraction; decor appended after (drawn last).
-          mjv_updateScene(model, data, &vis_opt, nullptr, &cam, mjCAT_ALL,
-                          &scene);
-          AppendAxesGizmo(&scene);
-          if (teleop_ready) {
-            teleop.AppendMarker(&scene);
-          }
-        }
+        const mjvScene* scene = scene_ready ? sim.Compose() : nullptr;
         VkCommandBuffer cmd = vk.BeginFrameCommands();
         proj_views.resize(views.size());
         std::vector<uint32_t> image_indices(views.size());
@@ -215,8 +189,8 @@ void android_main(android_app* app) {
             renderer.SetEye(static_cast<int>(i), views[i].pose, views[i].fov);
           }
           vk.BeginEyePass(cmd, static_cast<int>(i), image_indices[i]);
-          if (scene_ready) {
-            renderer.Draw(cmd, static_cast<int>(i), &scene);
+          if (scene) {
+            renderer.Draw(cmd, static_cast<int>(i), scene);
           }
           vk.EndEyePass(cmd);
         }
@@ -232,7 +206,7 @@ void android_main(android_app* app) {
   }
 
   renderer.Destroy();
-  mjv_freeScene(&scene);
+  sim.Destroy();
   if (data) {
     mj_deleteData(data);
   }

@@ -25,6 +25,16 @@ static inline void excitation_ctrl(double t, const double* home_ctrl, int nu,
   ctrl[3] = home_ctrl[3] + 0.30*sin(2*kPi*0.80*t);  // joint4
   ctrl[5] = home_ctrl[5] + 0.35*sin(2*kPi*1.15*t);  // joint6
   double close = t/1.5 > 1 ? 1 : t/1.5;
+  // DO NOT UNIFY THIS LINE WITH src/teleop.cc's GRIPPER MAPPING. They look
+  // identical and are not: `close` here is double, while teleop.cc's `t` is
+  // float. Both expressions promote to double — that is not the difference.
+  // The OPERAND differs, because teleop.cc's value was rounded to float
+  // first, so `255.0*(1.0 - x)` rounds differently in the two files.
+  // baselines/host-x86_64.txt was recorded through THIS expression, so a
+  // well-meaning "share the gripper mapping" refactor silently invalidates
+  // the reference — the gate stays green against a reference that no longer
+  // describes the code. Re-recording it is a separate, explicitly argued
+  // commit (docs/validation-web.md gate 1 has the procedure).
   ctrl[7] = 255.0*(1.0 - close);                    // gripper: 255 = open
 }
 

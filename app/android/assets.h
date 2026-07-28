@@ -3,8 +3,8 @@
 // keys are basename-stripped and lowercased, so the flattened assets/franka/
 // dir maps 1:1; the 67 mesh files have unique case-insensitive basenames.
 
-#ifndef MUJOCOXR_APP_ASSETS_H_
-#define MUJOCOXR_APP_ASSETS_H_
+#ifndef MUJOCOXR_APP_ANDROID_ASSETS_H_
+#define MUJOCOXR_APP_ANDROID_ASSETS_H_
 
 #include <android/asset_manager.h>
 
@@ -14,4 +14,4 @@
 // Returns nullptr on failure (details on logcat).
 mjModel* mxr_load_model_from_assets(AAssetManager* am);
 
-#endif  // MUJOCOXR_APP_ASSETS_H_
+#endif  // MUJOCOXR_APP_ANDROID_ASSETS_H_

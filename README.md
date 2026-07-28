@@ -2,8 +2,8 @@
 
 MuJoCo physics running **fully on-device** on a standalone Android XR headset
 (Quest-class, arm64-v8a), with the Franka Emika Panda teleoperated by an XR
-controller. Raw OpenXR + Vulkan + the MuJoCo C API — no game engine, no
-Python, no desktop in the loop.
+controller. The MuJoCo C API with a thin shell over a portable core: raw
+OpenXR + Vulkan, no game engine, no Python, no desktop in the loop.
 
 ## Features
 
@@ -31,10 +31,11 @@ Python, no desktop in the loop.
   servos; targets rate-limited at 1.5 m/s / 3 rad/s; trigger drives the
   gripper (inverted 0–255 range, 255 = open); A resets to the home
   keyframe; recentering auto-disengages the clutch.
-- **Owned frame conventions** — `app/frames.h` is the single owner of the
-  OpenXR↔MuJoCo mapping (`q_ws = (0.5, 0.5, −0.5, −0.5)` wxyz; xyzw↔wxyz
-  quaternion reordering at every crossing), with an in-headset world-axes
-  gizmo to verify handedness per axis.
+- **Owned frame conventions** — `src/frames.h` is the single owner of the
+  XR↔MuJoCo mapping (`MXR_Q_MJ_FROM_XR = (0.5, 0.5, −0.5, −0.5)` wxyz;
+  xyzw↔wxyz quaternion reordering at every crossing), with a world-axes gizmo
+  to verify handedness per axis. The axis map is checked on every build by
+  `bench/teleop_replay`.
 - **Cross-platform determinism harness** — a deterministic 2 s control
   excitation with a recorded host reference (`baselines/`); the same binary
   replays it on-device and checks final `qpos` (L∞) and energy, so a broken
@@ -44,13 +45,18 @@ Python, no desktop in the loop.
 - **Gradle-less packaging** — one shell script builds a signed APK with
   `aapt2`/`zipalign`/`apksigner`; scene assets flow APK `assets/` →
   `AAssetManager` → MuJoCo VFS.
+- **Headless verification** — `bench/teleop_replay` gives the teleop logic
+  its first execution outside a headset: a golden trajectory that locks the
+  refactor, plus the frame-convention axis map, zero engage jump and slew
+  compliance. It links the portable core into a host binary, which is also
+  what keeps the core free of shell dependencies.
 
 ## Requirements
 
 - CMake ≥ 3.16, a C/C++17 toolchain, network access at configure time
   (MuJoCo, OpenXR SDK and their dependencies are fetched and pinned)
 - Android NDK r26+ and `glslangValidator` (Debian/Ubuntu: `glslang-tools`)
-  for the headset build
+  for the Android build
 - Android SDK build-tools + platform jar + a JDK for APK packaging
 - git (for `scripts/fetch-menagerie.sh`)
 
@@ -69,7 +75,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ./build/ik_prototype third_party/menagerie/franka_emika_panda/scene.xml
 ./build/baseline     third_party/menagerie/franka_emika_panda/scene.xml
+./build/teleop_replay build/franka/ar_scene.xml \
+    --ref baselines/teleop-host-x86_64.txt
 ```
+
+The host build is the common prefix of both targets — it compiles and links
+the entire portable core, so it is the fastest way to find out whether a
+change to physics, teleop or frame conventions broke anything.
 
 Headset app:
 
@@ -80,7 +92,7 @@ cmake -S . -B build-android \
   -DANDROID_STL=c++_shared -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="-D_POSIX_C_SOURCE=200809L"
 cmake --build build-android --parallel
-android/package-apk.sh build-android mujocoxr.apk
+app/android/package-apk.sh build-android mujocoxr.apk
 adb install -r mujocoxr.apk
 adb logcat -s mujocoxr
 ```
@@ -90,21 +102,28 @@ An existing MuJoCo checkout can be used instead of the download with
 
 In the headset: squeeze to clutch the green target marker to your hand,
 trigger to close the gripper, A to reset the scene. Follow
-[docs/on-device-validation.md](docs/on-device-validation.md) for the ordered
-bring-up gates (benchmark → handedness → teleop acceptance → soak).
+[docs/validation-android.md](docs/validation-android.md) for the ordered
+bring-up gates (benchmark → XR skeleton → handedness → teleop acceptance →
+soak). Nothing here has ever run on a headset.
 
 ## Layout
 
-- `src/` — DLS IK solver, target rate limiter, MuJoCo error hooks (shared
-  by host tools and the app)
-- `app/` — the XR app: OpenXR shell, Vulkan context, `mjvScene` renderer,
-  frame conventions, clutched teleop, asset loading, GLSL shaders
+- `src/` — the portable core, shared by the shell and by the host tools:
+  frame conventions, clutched teleop, DLS IK, the frame loop
+  (`sim_scene`), mesh building, rate limiter, logging, error hooks. What
+  makes this a real tier is the `mxr_core` CMake target's restricted source
+  list, built in the default host configuration on every build — not the
+  directory name.
+- `app/android/` — the OpenXR + Vulkan shell: XR session, Vulkan context,
+  `mjvScene` renderer, APK asset loading, GLSL shaders, manifest and
+  packaging script
 - `host/` — host-side IK prototype (convergence + nullspace checks)
-- `bench/` — invariant baseline recorder/checker + `testspeed` benchmark
-- `baselines/` — recorded host reference for the on-device invariant check
-- `android/` — AndroidManifest + APK packaging script
+- `bench/` — invariant baseline recorder/checker, teleop replay, `testspeed`
+- `baselines/` — recorded references: the cross-platform invariant, and the
+  host teleop-refactor lock
 - `scripts/` — Menagerie scene fetcher (sparse, pinned)
-- `docs/` — on-device validation guide
+- `docs/` — the ordered validation gates, numbered so a second target can
+  reuse the numbering
 
 ## License notes
 

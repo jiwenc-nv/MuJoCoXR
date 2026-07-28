@@ -8,10 +8,15 @@
 //   baseline <scene.xml>               record: print baseline block to stdout
 //   baseline <scene.xml> --ref <file>  also compare against a recorded block
 
+#ifdef __FAST_MATH__
+#error "-ffast-math breaks the determinism this binary exists to measure"
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 #include <mujoco/mujoco.h>
 
@@ -70,7 +75,15 @@ int main(int argc, char** argv) {
   }
 
   char err[1024];
+  // Load wall time on stderr, never stdout: it is a per-machine measurement
+  // and the recorded block is a cross-machine invariant. It is here because
+  // the browser pays this cost on every page load and nothing else measures
+  // it — MuJoCo compiles meshes serially under Emscripten regardless of the
+  // threading flag, so this number does not improve with cores.
+  const clock_t t0 = clock();
   mjModel* m = mj_loadXML(argv[1], nullptr, err, sizeof(err));
+  fprintf(stderr, "mj_loadXML: %.3f s\n",
+          static_cast<double>(clock() - t0)/CLOCKS_PER_SEC);
   if (!m) {
     fprintf(stderr, "load failed: %s\n", err);
     return 1;

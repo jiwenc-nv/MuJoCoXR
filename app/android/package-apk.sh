@@ -12,7 +12,7 @@ BUILD=${1:?usage: package-apk.sh <android-build-dir> [output.apk]}
 OUT=$(realpath -m "${2:-mujocoxr.apk}")
 SDK=${ANDROID_SDK:-$HOME/Android/sdk}
 NDK=${ANDROID_NDK:-$HOME/Android/ndk/android-ndk-r27c}
-MENAGERIE=${MENAGERIE:-$(cd "$(dirname "$0")/.." && pwd)/third_party/menagerie}
+MENAGERIE=${MENAGERIE:-$(cd "$(dirname "$0")/../.." && pwd)/third_party/menagerie}
 if [ ! -f "$MENAGERIE/franka_emika_panda/scene.xml" ]; then
   echo "Franka scene not found at $MENAGERIE — run scripts/fetch-menagerie.sh" >&2
   exit 1
@@ -40,7 +40,7 @@ cp "$MENAGERIE/franka_emika_panda/scene.xml" \
    "$MENAGERIE/franka_emika_panda/panda.xml" \
    "$MENAGERIE/franka_emika_panda/assets/"* "$WORK/assets/franka/"
 # AR scene composition (panda.xml + table, no skybox/floor) — what the app loads.
-cp "$HERE/../assets/ar_scene.xml" "$WORK/assets/franka/"
+cp "$HERE/../../assets/ar_scene.xml" "$WORK/assets/franka/"
 # Menagerie NOTICE packaging: the Franka model is Apache-2.0.
 cp "$MENAGERIE/franka_emika_panda/LICENSE" "$WORK/assets/franka/LICENSE"
 

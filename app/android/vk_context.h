@@ -3,8 +3,8 @@
 // xrCreateVulkanInstanceKHR/xrCreateVulkanDeviceKHR; render targets wrap the
 // XR swapchain images. One render pass per eye, no multiview (do-not-build).
 
-#ifndef MUJOCOXR_APP_VK_CONTEXT_H_
-#define MUJOCOXR_APP_VK_CONTEXT_H_
+#ifndef MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
+#define MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
 
 #include <vulkan/vulkan.h>
 
@@ -74,4 +74,4 @@ class VkContext {
   std::vector<EyeTarget> eyes_;
 };
 
-#endif  // MUJOCOXR_APP_VK_CONTEXT_H_
+#endif  // MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
