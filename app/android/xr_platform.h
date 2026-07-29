@@ -1,8 +1,8 @@
 // The Android half of OpenXR instance creation, and the ONLY file in this tree
 // that defines XR_USE_PLATFORM_ANDROID.
 //
-// It exists because app/openxr/ may not name a platform (see the tier rule at
-// the top of app/openxr/xr_shell.h, enforced by a configure-time scan). Two
+// It exists because src/openxr/ may not name a platform (see the tier rule at
+// the top of src/openxr/xr_shell.h, enforced by a configure-time scan). Two
 // things are genuinely Android-only about bringing up an OpenXR instance —
 // the mandatory xrInitializeLoaderKHR call and the
 // XrInstanceCreateInfoAndroidKHR carrying the VM and activity — and both live

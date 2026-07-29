@@ -60,7 +60,7 @@ void android_main(android_app* app) {
   VkContext vk;
   // Loader init and the Android create-info chain are the whole of what is
   // platform-specific about instance creation; app/android/xr_platform.cc owns
-  // both so app/openxr/ can stay platform-free.
+  // both so src/openxr/ can stay platform-free.
   const void* platform_next = mxr_android_xr_init(app);
   // 1.0 and a zero wait keep this exactly the call it always was: one
   // xrGetSystem attempt, no retry. The `have_system()` term is the other half

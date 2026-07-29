@@ -3,27 +3,30 @@
 // set bound on BOTH hands across every supported interaction profile (grip
 // pose, trigger, squeeze, A/X, B/Y).
 //
-// app/openxr/ IS A TIER, AND ITS RULE IS THE INVERSE OF src/'s. src/ may not
-// name a graphics or runtime API; this directory exists to name exactly those
-// two — Vulkan and OpenXR — and in exchange may not name a PLATFORM: no JNI,
+// src/openxr/ IS A TIER, AND ITS RULE IS THE INVERSE OF THE ONE ABOVE IT.
+// src/ holds two tiers: its TOP LEVEL is the portable core and may not name a
+// graphics or runtime API, while this directory exists to name exactly two of
+// them — Vulkan and OpenXR — and in exchange may not name a PLATFORM: no JNI,
 // no NDK or Emscripten headers, no platform-selection macro for the OpenXR
 // headers, no compiler platform predefine. THE EXACT ALTERNATION IS IN
 // CMakeLists.txt, not restated here — a configure-time scan is the rule, and
 // this file is inside what it scans, so spelling the forbidden tokens in this
 // comment would fail the build that the comment describes. Both scans sit in
 // the CMake common prefix, so they run in every configuration, including the
-// plain host build where this tier is not compiled at all.
+// plain host build where this tier is not compiled at all — and between them
+// they cover every first-party file under src/ exactly once, which is why the
+// top-level scan globs `src/*` and NOT `src/**`.
 //
 // That is why CreateInstance takes its platform chain as an opaque pointer:
 // Android's loader init and its create-info struct live in
 // app/android/xr_platform.cc, the one file in the tree that selects the
 // Android OpenXR platform. A desktop mirror window would break the same rule
 // from the other side — it belongs in app/linux/ with its own surface and
-// present loop, NEVER inside app/openxr/vk_context.cc, which is deliberately
+// present loop, NEVER inside src/openxr/vk_context.cc, which is deliberately
 // surfaceless.
 
-#ifndef MUJOCOXR_APP_OPENXR_XR_SHELL_H_
-#define MUJOCOXR_APP_OPENXR_XR_SHELL_H_
+#ifndef MUJOCOXR_SRC_OPENXR_XR_SHELL_H_
+#define MUJOCOXR_SRC_OPENXR_XR_SHELL_H_
 
 #include <csignal>
 
@@ -244,4 +247,4 @@ class XrShell {
   int64_t not_tracked_frames_ = 0;
 };
 
-#endif  // MUJOCOXR_APP_OPENXR_XR_SHELL_H_
+#endif  // MUJOCOXR_SRC_OPENXR_XR_SHELL_H_

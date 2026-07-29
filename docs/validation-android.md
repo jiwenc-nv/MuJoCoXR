@@ -257,7 +257,7 @@ Requiring a headset:
 
   `session_running_` is cleared only on `STOPPING` / `EXITING` /
   `LOSS_PENDING` (`XrShell::HandleSessionStateChange` in
-  `app/openxr/xr_shell.cc`, which latches the edge that
+  `src/openxr/xr_shell.cc`, which latches the edge that
   `XrShell::TakeSessionEndEdge()` hands to the shell), so on a runtime that
   only drops focus, the second row is the path taken and `EndSession` never
   fires.

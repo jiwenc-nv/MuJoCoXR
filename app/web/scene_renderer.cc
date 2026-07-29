@@ -18,7 +18,7 @@ const char* const kFragSrc =
 #include "shaders/scene.frag.inc"
     ;
 
-// out = a * b, column-major 4x4. Twin of app/openxr/scene_renderer.cc.
+// out = a * b, column-major 4x4. Twin of src/openxr/scene_renderer.cc.
 void Mat4Mul(float out[16], const float a[16], const float b[16]) {
   float r[16];
   for (int c = 0; c < 4; ++c) {
@@ -93,7 +93,7 @@ bool SceneRenderer::Create(const mjModel* m) {
                         reinterpret_cast<void*>(offsetof(Vertex, normal)));
   glBindVertexArray(0);
 
-  // Matches app/openxr/scene_renderer.cc:319-345 state for state: no
+  // Matches src/openxr/scene_renderer.cc:319-345 state for state: no
   // culling (mixed winding across the OBJ/STL assets), straight-alpha colour
   // blend with alpha ONE/ZERO, depth LEQUAL with writes, no sorting.
   glDisable(GL_CULL_FACE);

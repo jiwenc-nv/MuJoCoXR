@@ -1,4 +1,4 @@
-// mjvScene -> WebGL2, the twin of app/openxr/scene_renderer.h and
+// mjvScene -> WebGL2, the twin of src/openxr/scene_renderer.h and
 // deliberately the same shape: MESH + BOX only, one program, one hardcoded
 // directional light, no textures/shadows/sorting. Geometry and appearance
 // constants come from src/mesh_buffers.h so both renderers draw the same

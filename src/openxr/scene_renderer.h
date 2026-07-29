@@ -6,8 +6,8 @@
 // appearance constants come from src/mesh_buffers.h so this renderer and its
 // WebGL2 twin draw the same pixels; everything below is Vulkan-only.
 
-#ifndef MUJOCOXR_APP_OPENXR_SCENE_RENDERER_H_
-#define MUJOCOXR_APP_OPENXR_SCENE_RENDERER_H_
+#ifndef MUJOCOXR_SRC_OPENXR_SCENE_RENDERER_H_
+#define MUJOCOXR_SRC_OPENXR_SCENE_RENDERER_H_
 
 #include <vulkan/vulkan.h>
 
@@ -55,4 +55,4 @@ class SceneRenderer {
   float xr_from_mj_[16] = {0};
 };
 
-#endif  // MUJOCOXR_APP_OPENXR_SCENE_RENDERER_H_
+#endif  // MUJOCOXR_SRC_OPENXR_SCENE_RENDERER_H_
