@@ -8,7 +8,7 @@
 // into an InputState -> SimScene::Advance -> if the runtime will present this
 // frame, SimScene::Compose and two eye passes. What the robot does lives in
 // src/sim_scene.cc, shared with the Android and WebXR shells; the OpenXR and
-// Vulkan machinery lives in app/openxr/, shared with Android.
+// Vulkan machinery lives in src/openxr/, shared with Android.
 //
 // THREE THINGS ARE DIFFERENT HERE AND EACH IS A CONSEQUENCE OF THE PLATFORM,
 // not a preference:
@@ -249,7 +249,7 @@ int main(int argc, char** argv) {
   // its job is to report the absence of a headset rather than sit through it.
   if (!xr.CreateInstance(nullptr, nullptr, XR_API_VERSION_1_1,
                          probe ? 0 : timeout_s)) {
-    // THE CLOUDXR-SPECIFIC HALF LIVES HERE, not in app/openxr/. Four distinct
+    // THE CLOUDXR-SPECIFIC HALF LIVES HERE, not in src/openxr/. Four distinct
     // faults report XR_ERROR_RUNTIME_UNAVAILABLE, and naming only the first
     // strands anyone whose fault is one of the other three: they fix the
     // manifest, see an identical -51, and have nowhere left to go. But three

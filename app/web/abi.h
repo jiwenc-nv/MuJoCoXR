@@ -123,7 +123,7 @@ MXR_ABI_EXPORT int mxr_init(void);        // GL context, shaders, GL state
 // mxr_menu_count has nothing to marshal — it is `int(void)` and so is
 // mxr_scene_count — so the honest question is why it is not just
 // MXR_ABI_EXPORT on the original. Because MXR_ABI_EXPORT is defined in THIS
-// header, and src/robot_spec.h is the portable tier: exporting it there would
+// header, and src/robot_spec.h is in the portable tier: exporting it there would
 // put a web-target concern into a file that Android and the host binaries
 // also compile. The twin keeps that boundary at the cost of one forwarding
 // line, which is the right trade in that direction.

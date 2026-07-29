@@ -11,7 +11,10 @@
 // the frame-convention axis map, zero engage jump, slew compliance, and a
 // geometry census. Being a HOST executable linked against mxr_core is also
 // what enforces the portable tier — a shell symbol reaching into the core
-// fails to link here.
+// fails to link here. THAT IS A CLAIM ABOUT mxr_core's SOURCE LIST, not about
+// a directory: src/ also holds src/openxr/, which is a shell tier and is not
+// linked here at all. The configure-time scans police the directories; this
+// binary polices the symbols, and it is the half that holds on every machine.
 //
 // The reference file locks ONE ARCHITECTURE against itself across a
 // refactor — it records the arch it was taken on and the bitwise trace

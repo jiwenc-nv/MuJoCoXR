@@ -25,11 +25,11 @@ tether a display.
   checklist, all of it data —
   [docs/adding-a-robot.md](docs/adding-a-robot.md) is authoritative and this
   bullet deliberately does not restate the count.
-- **One OpenXR shell, two platforms** — `app/openxr/` is the session,
+- **One OpenXR shell, two platforms** — `src/openxr/` is the session,
   Vulkan context and renderer; `app/android/` and `app/linux/` are the entry
-  points, 3 files and 1 file respectively. A configure-time scan keeps the
-  shared tier free of platform headers, the mirror of the scan that keeps
-  `src/` free of graphics headers.
+  points, 3 files and 1 file respectively. A configure-time scan keeps that
+  tier free of platform headers, the mirror of the scan that keeps `src/`'s
+  top level free of graphics headers.
 - **Linux / CloudXR client** — the same shell against a desktop OpenXR
   runtime, so a workstation GPU runs the physics and the render and the
   headset receives frames. Requests OpenXR 1.1 (which is what makes
@@ -207,17 +207,23 @@ attached at all.
 
 ## Layout
 
-- `src/` — the portable core, shared by all three shells and the host tools:
-  frame conventions, the robot/scene tables (`robot_spec`), clutched teleop,
-  DLS IK, the frame loop (`sim_scene`), mesh building, rate limiter, logging,
-  error hooks. What
-  makes this a real tier is the `mxr_core` CMake target's restricted source
-  list, built in the default host configuration on every build — not the
-  directory name.
-- `app/openxr/` — the OpenXR + Vulkan shell shared by the Android and Linux
+**`app/` is exactly the three shells; `src/` is everything that is not a
+shell** — which is two tiers under two different rules, each with its own
+configure-time scan, and every first-party file covered by exactly one.
+
+- `src/` (top level) — the portable core, shared by all three shells and the
+  host tools: frame conventions, the robot/scene tables (`robot_spec`),
+  clutched teleop, DLS IK, the frame loop (`sim_scene`), mesh building, rate
+  limiter, logging, error hooks. It may not name a graphics or runtime API.
+  What makes this a real tier is the `mxr_core` CMake target's restricted
+  source list, built in the default host configuration on every build — not
+  the directory name, which is why the scan is the *second* mechanism and not
+  the first.
+- `src/openxr/` — the OpenXR + Vulkan shell shared by the Android and Linux
   targets: XR session, Vulkan context, `mjvScene` renderer, GLSL shaders. The
-  inverse of `src/`'s rule — it exists to name Vulkan and OpenXR, and may not
-  name a platform; a configure-time scan enforces that
+  inverse rule — it exists to name Vulkan and OpenXR, and may not name a
+  platform. Not portable, and not a shell either: it is the half of two shells
+  that turned out to be the same code.
 - `app/android/` — the Android entry point: `android_main`, APK asset loading
   through a VFS, the loader/create-info seam, manifest and packaging script
 - `app/linux/` — the Linux entry point: argument parsing, signal handling and

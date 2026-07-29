@@ -46,7 +46,7 @@ command -v cmake >/dev/null || missing="$missing
   Android NDK r26+ not found at $NDK
     sdkmanager --install 'ndk;27.2.12479018', or set ANDROID_NDK"
 
-# glslangValidator compiles app/openxr/shaders/*.{vert,frag} to SPIR-V and
+# glslangValidator compiles src/openxr/shaders/*.{vert,frag} to SPIR-V and
 # CMakeLists.txt marks it REQUIRED in the shared OpenXR+Vulkan block — so it
 # gates EVERY
 # Android configure, including a --no-apk CLI-tools build that links no

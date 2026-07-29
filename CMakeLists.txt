@@ -132,10 +132,18 @@ endif()
 add_library(mxr_ik STATIC src/ik_dls.c src/robot_spec.c)
 target_link_libraries(mxr_ik PUBLIC mujoco mxr_platform)
 
-# The portable tier. `src/` is only where these files live — what makes the
-# tier real is THIS TARGET'S RESTRICTED SOURCE LIST, compiled in the default
-# host configuration on every build. Adding a file to src/ does not join the
-# tier; adding it to this list does.
+# The portable tier. `src/` TOP LEVEL is only where these files live — what
+# makes the tier real is THIS TARGET'S RESTRICTED SOURCE LIST, compiled in the
+# default host configuration on every build. Adding a file to src/ does not
+# join the tier; adding it to this list does.
+#
+# src/ NOW HOLDS TWO TIERS UNDER TWO DIFFERENT RULES, and the split is the
+# whole reason `app/` is exactly the three shells: src/ is everything that is
+# not a shell. The top level is portable and may not name a graphics or
+# runtime API (scan A, below). src/openxr/ is the OpenXR + Vulkan shell tier,
+# shared by the Android and Linux apps, and exists to name exactly those two
+# while naming no platform (scan B, further down). Every first-party file
+# under src/ is covered by exactly one of them.
 #
 # Two mechanisms enforce it, and they cover different things:
 #
@@ -170,6 +178,13 @@ set(MXR_CORE_SOURCES
   src/teleop.cc
   src/sim_scene.cc
   src/mesh_buffers.cc)
+# GLOB, NOT GLOB_RECURSE, AND THAT IS NOW LOAD-BEARING RATHER THAN INCIDENTAL.
+# src/openxr/ lives one level down and is governed by scan B, whose rule is the
+# INVERSE of this one — it is required to include <vulkan/...> and
+# <openxr/...>. Making this recursive to be "thorough" would therefore fail the
+# build with a FATAL_ERROR from this scan that reads exactly like a real
+# violation, on files that are correct. If you want to widen this, widen it to
+# `src/*.h src/*.c` plus a NEW scan for the new directory; do not merge them.
 file(GLOB MXR_CORE_HEADERS CONFIGURE_DEPENDS
      RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
      ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
@@ -187,23 +202,33 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              ${MXR_CORE_SOURCES} ${MXR_CORE_HEADERS})
 
-# THE DUAL OF THE SCAN ABOVE, for the other tier — same mechanism, alternation
-# inverted. app/openxr/ is the OpenXR + Vulkan shell shared by the Android and
-# Linux apps: it EXISTS to name vulkan/ and openxr/, and what it must not name
-# is a platform. Five sites violated this on the day it was written
-# (jni.h, the platform-select define, a forward declaration, a signature and
-# an NDK include, all in xr_shell.{h,cc}); narrowing that seam into
-# app/android/xr_platform.cc is what made the tier real, and this is what
+# SCAN B — THE DUAL OF THE SCAN ABOVE, for the other tier under src/: same
+# mechanism, alternation inverted. src/openxr/ is the OpenXR + Vulkan shell
+# shared by the Android and Linux apps: it EXISTS to name vulkan/ and openxr/,
+# and what it must not name is a platform. Five sites violated this on the day
+# it was written (jni.h, the platform-select define, a forward declaration, a
+# signature and an NDK include, all in xr_shell.{h,cc}); narrowing that seam
+# into app/android/xr_platform.cc is what made the tier real, and this is what
 # keeps it that way.
 #
 # The last alternative is not about platform code at all: it catches an INCLUDE
 # GUARD left behind by a `git mv` into this directory. That mistake compiles
 # clean and is invisible, it survived the first pass here, and none of the
 # other alternatives can see it — `__ANDROID__` does not match
-# `MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_`. It names all three shell directories
-# rather than the one that happened to be the source, because the rule is
-# about A PLATFORM and a file moved here from app/web/ would be the same
-# mistake.
+# `MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_`.
+#
+# `MUJOCOXR_APP_` IS DELIBERATELY A BARE PREFIX rather than a list of the three
+# shell directories, because after the move `app/` is exactly the shells — so
+# every guard under app/ is a guard this directory must not contain, and
+# naming them individually would just be a list to forget to extend.
+#
+# What it does NOT catch, stated rather than left to be discovered: a file
+# moved the other way, DOWN from src/ top level, carries `MUJOCOXR_SRC_<NAME>_`
+# — and this directory's own correct guards are `MUJOCOXR_SRC_OPENXR_*`, which
+# share that prefix. Excluding one while matching the other needs negative
+# lookahead, which CMake's regex does not have. A positive check ("every guard
+# here begins with MUJOCOXR_SRC_OPENXR_") would cover both directions and is
+# the upgrade if this ever bites.
 #
 # IT MATCHES MORE THAN #include, because only two of those five were includes.
 # The platform-select define changes which structs openxr_platform.h even
@@ -216,23 +241,23 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 # almost nobody's machine. Here it runs on `cmake -S . -B build`.
 file(GLOB MXR_OPENXR_SOURCES CONFIGURE_DEPENDS
      RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-     ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/*.h
-     ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/*.cc)
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/openxr/*.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/openxr/*.cc)
 foreach(shell_src ${MXR_OPENXR_SOURCES})
   file(READ ${CMAKE_CURRENT_SOURCE_DIR}/${shell_src} shell_text)
   if(shell_text MATCHES "#[ \t]*include[ \t]*[<\"](jni\\.h|android/|android_native_app_glue|emscripten/)"
      OR shell_text MATCHES "XR_USE_PLATFORM_"
-     OR shell_text MATCHES "(android_app|AAssetManager|ALooper|__ANDROID__|__EMSCRIPTEN__|MUJOCOXR_APP_(ANDROID|WEB|LINUX))")
+     OR shell_text MATCHES "(android_app|AAssetManager|ALooper|__ANDROID__|__EMSCRIPTEN__|MUJOCOXR_APP_)")
     message(FATAL_ERROR
-      "${shell_src} names a platform. app/openxr/ is the shared OpenXR + "
+      "${shell_src} names a platform. src/openxr/ is the shared OpenXR + "
       "Vulkan shell tier: it is compiled for BOTH the Android app and the "
       "Linux CloudXR client from one source list, and must name only Vulkan "
       "and OpenXR. Put the platform half in app/android/ or app/linux/ and "
       "hand it to XrShell as an opaque pointer — see app/android/xr_platform.h."
       "\n\nIF YOU JUST MOVED A FILE HERE, the hit is more likely its include "
-      "guard than its code: rename MUJOCOXR_APP_<PLATFORM>_* to "
-      "MUJOCOXR_APP_OPENXR_*. That is a different mistake with the same "
-      "message, and it is the one this arm was added for.")
+      "guard than its code: rename it to MUJOCOXR_SRC_OPENXR_*. That is a "
+      "different mistake with the same message, and it is the one the "
+      "MUJOCOXR_APP_ arm was added for.")
   endif()
 endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -559,8 +584,8 @@ if(ANDROID OR MUJOCOXR_BUILD_LINUX_XR)
       COMMAND ${CMAKE_COMMAND} -E make_directory
               ${CMAKE_CURRENT_BINARY_DIR}/shaders
       COMMAND ${GLSLANG_VALIDATOR} -V --vn ${shader_var}_spv -o ${shader_out}
-              ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/shaders/${shader}
-      DEPENDS app/openxr/shaders/${shader})
+              ${CMAKE_CURRENT_SOURCE_DIR}/src/openxr/shaders/${shader}
+      DEPENDS src/openxr/shaders/${shader})
     list(APPEND MXR_SHADER_HEADERS ${shader_out})
   endforeach()
   add_custom_target(mxr_shaders DEPENDS ${MXR_SHADER_HEADERS})
@@ -569,14 +594,14 @@ if(ANDROID OR MUJOCOXR_BUILD_LINUX_XR)
   # THIS SOURCE LIST, not the directory name — and the scan in the common
   # prefix is the other half, since a source list cannot see a #define.
   add_library(mxr_openxr STATIC
-    app/openxr/xr_shell.cc
-    app/openxr/vk_context.cc
-    app/openxr/scene_renderer.cc)
+    src/openxr/xr_shell.cc
+    src/openxr/vk_context.cc
+    src/openxr/scene_renderer.cc)
   add_dependencies(mxr_openxr mxr_shaders)
-  # PUBLIC app/openxr: both shells include xr_shell.h from their own main.cc.
+  # PUBLIC src/openxr: both shells include xr_shell.h from their own main.cc.
   # PRIVATE the binary dir: the generated SPIR-V headers are an implementation
   # detail of scene_renderer.cc and no consumer includes them.
-  target_include_directories(mxr_openxr PUBLIC app/openxr
+  target_include_directories(mxr_openxr PUBLIC src/openxr
                                         PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   # Vulkan arrives differently on the two platforms and this is the only line
   # that has to know: the NDK ships libvulkan in the sysroot under the bare
@@ -610,7 +635,7 @@ if(ANDROID)
   # the measure, so keep it accurate: five files before the OpenXR + Vulkan
   # half became a tier of its own, three after. The third is xr_platform.cc,
   # which is not a leftover — it is the platform seam the tier's purity scan
-  # forced out of app/openxr/, and it is why that scan passes with zero
+  # forced out of src/openxr/, and it is why that scan passes with zero
   # guarded violations rather than five.
   add_library(mujocoxr SHARED
     app/android/main.cc

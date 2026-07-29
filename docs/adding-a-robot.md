@@ -51,7 +51,7 @@ Nothing else. In particular **no edit** to `src/ik_dls.{h,c}`,
 `src/teleop.{h,cc}`, `src/sim_scene.{h,cc}`, `src/frames.h`, `app/web/abi.h`,
 `app/web/shell.js`, `app/web/index.html`, `app/web/main.cc`,
 `app/android/AndroidManifest.xml`, `app/android/main.cc`,
-`app/android/assets.cc`, `app/openxr/*` or `app/linux/main.cc`.
+`app/android/assets.cc`, `src/openxr/*` or `app/linux/main.cc`.
 
 The last two are an EXTENSION OF THE CLAIM ONTO UNTESTED GROUND, and are
 weaker than the rest of the list: the Android and web paths have had a robot
