@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "mesh_buffers.h"  // kNearZ / kFarZ, the projection this depth was rendered with
 #include "mxr_log.h"
 
 namespace {
@@ -150,6 +151,14 @@ bool XrShell::CreateInstance(const void* platform_next,
     if (!strcmp(e.extensionName, "XR_KHR_generic_controller")) {
       generic_controller_available_ = true;
     }
+    // Submitting depth is what lets a runtime REPROJECT rather than merely
+    // rotate the last frame. Probed like the two above and for the same
+    // reason: an unadvertised name in the enabled list is
+    // XR_ERROR_EXTENSION_NOT_PRESENT, i.e. a hard startup failure.
+    if (!strcmp(e.extensionName,
+                XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME)) {
+      depth_layer_ext_ = true;
+    }
   }
 
   // platform_ext FIRST, so the enabled list is byte-for-byte what it was when
@@ -167,6 +176,9 @@ bool XrShell::CreateInstance(const void* platform_next,
   }
   if (generic_controller_available_) {
     enabled.push_back("XR_KHR_generic_controller");
+  }
+  if (depth_layer_ext_) {
+    enabled.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
   }
 
   XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -224,13 +236,14 @@ bool XrShell::CreateInstance(const void* platform_next,
 
   XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
   xrGetInstanceProperties(instance_, &props);
-  LOGI("OpenXR runtime: %s %u.%u.%u, API %u.%u granted (local_floor_ext=%d)",
+  LOGI("OpenXR runtime: %s %u.%u.%u, API %u.%u granted (local_floor_ext=%d, "
+       "depth_layer_ext=%d)",
        props.runtimeName,
        XR_VERSION_MAJOR(props.runtimeVersion),
        XR_VERSION_MINOR(props.runtimeVersion),
        XR_VERSION_PATCH(props.runtimeVersion),
        XR_VERSION_MAJOR(api_version_), XR_VERSION_MINOR(api_version_),
-       local_floor_ext_);
+       local_floor_ext_, depth_layer_ext_);
 
   if (!WaitForSystem(system_wait_s)) {
     return false;
@@ -399,25 +412,51 @@ bool XrShell::CreateSwapchains(const std::vector<int64_t>& preferred) {
     return false;
   }
 
+  // ONE ENUMERATION, TWO PICKS. The runtime returns colour and depth formats
+  // in a single mixed list, in its own order of preference — so a depth format
+  // is chosen by intersecting THIS list, not by asking the physical device
+  // what it can do. Those are different questions: a device that supports
+  // D32_SFLOAT as an attachment says nothing about whether the runtime will
+  // accept a swapchain of it, and a swapchain the runtime rejects is a
+  // startup failure rather than a fallback.
   uint32_t nfmt = 0;
   xrEnumerateSwapchainFormats(session_, 0, &nfmt, nullptr);
   std::vector<int64_t> formats(nfmt);
   xrEnumerateSwapchainFormats(session_, nfmt, &nfmt, formats.data());
-  swapchain_format_ = 0;
-  for (int64_t want : preferred) {
-    for (int64_t have : formats) {
-      if (want == have) {
-        swapchain_format_ = want;
-        break;
+  auto pick = [&formats](const std::vector<int64_t>& want) {
+    for (int64_t w : want) {
+      for (int64_t have : formats) {
+        if (w == have) {
+          return w;
+        }
       }
     }
-    if (swapchain_format_) {
-      break;
-    }
-  }
+    return static_cast<int64_t>(0);
+  };
+
+  swapchain_format_ = pick(preferred);
   if (!swapchain_format_) {
     LOGE("no preferred swapchain format available");
     return false;
+  }
+
+  // The depth preference is NOT a parameter the way `preferred` is. Both
+  // shells want the same thing and neither has an opinion to express, so a
+  // second argument would be the same list written twice in two main.cc files
+  // to vary nothing.
+  if (depth_layer_ext_) {
+    depth_swapchain_format_ = pick({VK_FORMAT_D32_SFLOAT,
+                                    VK_FORMAT_D24_UNORM_S8_UINT,
+                                    VK_FORMAT_D16_UNORM});
+    if (!depth_swapchain_format_) {
+      // Advertised the extension, offers no depth format. Degrade to the
+      // app-owned depth image rather than fail: the picture is still correct,
+      // only the reprojection quality is lost.
+      LOGW("runtime advertises %s but offers no depth swapchain format — "
+           "falling back to an app-owned depth image, so head-rotation "
+           "reprojection will be unavailable",
+           XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+    }
   }
 
   swapchains_.resize(config_views_.size());
@@ -452,6 +491,52 @@ bool XrShell::CreateSwapchains(const std::vector<int64_t>& preferred) {
     }
     LOGI("swapchain %zu: %dx%d, %u images, format %lld", i, sc.width,
          sc.height, nimg, static_cast<long long>(swapchain_format_));
+  }
+
+  if (!depth_swapchain_format_) {
+    return true;
+  }
+  // Same geometry and sample count as the colour swapchain by construction —
+  // both are built from the same XrViewConfigurationView, and a mismatch
+  // would make the depth image describe a different framebuffer than the one
+  // it was rendered with.
+  depth_swapchains_.resize(config_views_.size());
+  for (size_t i = 0; i < config_views_.size(); ++i) {
+    const auto& cv = config_views_[i];
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    info.format = depth_swapchain_format_;
+    info.sampleCount = 1;
+    info.width = cv.recommendedImageRectWidth;
+    info.height = cv.recommendedImageRectHeight;
+    info.faceCount = 1;
+    info.arraySize = 1;
+    info.mipCount = 1;
+    auto& sc = depth_swapchains_[i];
+    if (!XrOk(xrCreateSwapchain(session_, &info, &sc.handle),
+              "xrCreateSwapchain(depth)")) {
+      // Leave nothing half-built: depth_layer() is "the vector is non-empty",
+      // so a partial vector would claim a capability that does not exist.
+      depth_swapchains_.clear();
+      depth_swapchain_format_ = 0;
+      LOGW("depth swapchain creation failed — continuing without depth "
+           "submission; reprojection will be unavailable");
+      return true;
+    }
+    sc.width = info.width;
+    sc.height = info.height;
+    uint32_t nimg = 0;
+    xrEnumerateSwapchainImages(sc.handle, 0, &nimg, nullptr);
+    sc.images.assign(nimg, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+    if (!XrOk(xrEnumerateSwapchainImages(
+                  sc.handle, nimg, &nimg,
+                  reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                      sc.images.data())),
+              "xrEnumerateSwapchainImages(depth)")) {
+      return false;
+    }
+    LOGI("depth swapchain %zu: %dx%d, %u images, format %lld", i, sc.width,
+         sc.height, nimg, static_cast<long long>(depth_swapchain_format_));
   }
   return true;
 }
@@ -796,23 +881,78 @@ bool XrShell::LocateViews(XrTime time, std::vector<XrView>* views) {
          (state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
 }
 
-bool XrShell::AcquireSwapchainImage(int view, uint32_t* image_index) {
+bool XrShell::AcquireFrom(const SwapchainInfo& sc, uint32_t* image_index) {
   XrSwapchainImageAcquireInfo acq{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-  if (!XrOk(xrAcquireSwapchainImage(swapchains_[view].handle, &acq,
-                                    image_index),
+  if (!XrOk(xrAcquireSwapchainImage(sc.handle, &acq, image_index),
             "xrAcquireSwapchainImage")) {
     return false;
   }
   XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
   wait.timeout = XR_INFINITE_DURATION;
-  return XrOk(xrWaitSwapchainImage(swapchains_[view].handle, &wait),
-              "xrWaitSwapchainImage");
+  return XrOk(xrWaitSwapchainImage(sc.handle, &wait), "xrWaitSwapchainImage");
+}
+
+bool XrShell::ReleaseFrom(const SwapchainInfo& sc) {
+  XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  return XrOk(xrReleaseSwapchainImage(sc.handle, &rel),
+              "xrReleaseSwapchainImage");
+}
+
+bool XrShell::AcquireSwapchainImage(int view, uint32_t* image_index) {
+  return AcquireFrom(swapchains_[view], image_index);
 }
 
 bool XrShell::ReleaseSwapchainImage(int view) {
-  XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-  return XrOk(xrReleaseSwapchainImage(swapchains_[view].handle, &rel),
-              "xrReleaseSwapchainImage");
+  return ReleaseFrom(swapchains_[view]);
+}
+
+bool XrShell::AcquireDepthImage(int view, uint32_t* image_index) {
+  // *image_index stays 0 with no depth layer, which is what makes the
+  // framebuffer table below degenerate to exactly the pre-depth one.
+  *image_index = 0;
+  if (!depth_layer()) {
+    return true;
+  }
+  return AcquireFrom(depth_swapchains_[view], image_index);
+}
+
+bool XrShell::ReleaseDepthImage(int view) {
+  if (!depth_layer()) {
+    return true;
+  }
+  return ReleaseFrom(depth_swapchains_[view]);
+}
+
+void XrShell::ChainDepthInfo(
+    std::vector<XrCompositionLayerProjectionView>* proj_views,
+    std::vector<XrCompositionLayerDepthInfoKHR>* depth_infos) {
+  depth_infos->clear();
+  if (!depth_layer() || proj_views->empty()) {
+    return;
+  }
+  // SIZED ONCE, THEN ADDRESSED. resize() may reallocate, so every address
+  // taken below must be taken after the last one — hence a single resize
+  // before the loop rather than push_back inside it.
+  depth_infos->resize(proj_views->size(),
+                      {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
+  for (size_t i = 0; i < proj_views->size(); ++i) {
+    const auto& sc = depth_swapchains_[i];
+    auto& d = (*depth_infos)[i];
+    d.subImage.swapchain = sc.handle;
+    d.subImage.imageRect = {{0, 0}, {sc.width, sc.height}};
+    d.subImage.imageArrayIndex = 0;
+    // VERIFIED AGAINST ProjFromFov IN scene_renderer.cc RATHER THAN ASSUMED,
+    // because getting it backwards is silently wrong rather than loud: that
+    // projection is STANDARD Z, mapping near->0 and far->1 (m22 = f/(n-f),
+    // m23 = f*n/(n-f), m32 = -1, so at z=-n the ndc z is 0 and at z=-f it is
+    // 1). If it is ever changed to reverse-Z, minDepth/maxDepth stay 0/1 and
+    // nearZ/farZ SWAP — the spec signals reversal by nearZ > farZ.
+    d.minDepth = 0.0f;
+    d.maxDepth = 1.0f;
+    d.nearZ = kNearZ;
+    d.farZ = kFarZ;
+    (*proj_views)[i].next = &d;
+  }
 }
 
 bool XrShell::EndFrame(
@@ -978,6 +1118,12 @@ void XrShell::Destroy() {
     }
   }
   swapchains_.clear();
+  for (auto& sc : depth_swapchains_) {
+    if (sc.handle != XR_NULL_HANDLE) {
+      xrDestroySwapchain(sc.handle);
+    }
+  }
+  depth_swapchains_.clear();
   for (int h = 0; h < 2; ++h) {
     if (grip_spaces_[h] != XR_NULL_HANDLE) {
       xrDestroySpace(grip_spaces_[h]);

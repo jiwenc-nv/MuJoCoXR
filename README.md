@@ -30,6 +30,11 @@ tether a display.
   points, 3 files and 1 file respectively. A configure-time scan keeps that
   tier free of platform headers, the mirror of the scan that keeps `src/`'s
   top level free of graphics headers.
+- **Depth submission for reprojection** — a depth swapchain per eye chained
+  into each projection view via `XR_KHR_composition_layer_depth`, so a
+  streaming runtime can reproject rather than merely rotate the last frame.
+  Gated on the extension and not on the platform: Quest advertises it too. The
+  app-owned depth path remains for runtimes that do not.
 - **Linux / CloudXR client** — the same shell against a desktop OpenXR
   runtime, so a workstation GPU runs the physics and the render and the
   headset receives frames. Requests OpenXR 1.1 (which is what makes

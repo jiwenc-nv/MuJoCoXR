@@ -16,11 +16,24 @@ class XrShell;
 struct EyeTarget {
   int32_t width = 0;
   int32_t height = 0;
+  // App-owned depth, and ONLY when the runtime has no depth swapchain to give
+  // us. Not dead code and not a legacy path: it is what every runtime without
+  // XR_KHR_composition_layer_depth uses, Android included.
   VkImage depth_image = VK_NULL_HANDLE;
   VkDeviceMemory depth_memory = VK_NULL_HANDLE;
-  VkImageView depth_view = VK_NULL_HANDLE;
-  std::vector<VkImageView> color_views;    // one per swapchain image
-  std::vector<VkFramebuffer> framebuffers; // one per swapchain image
+
+  std::vector<VkImageView> color_views;  // N, from the colour swapchain
+  // M views: the depth swapchain's images, or exactly one app-owned image.
+  std::vector<VkImageView> depth_views;
+  // N*M, indexed [color_index*M + depth_index] — see FramebufferAt().
+  //
+  // THE PRODUCT IS NOT PARANOIA. Colour and depth are two independent
+  // swapchains with their own image counts, and the runtime guarantees
+  // NOTHING about the two acquired indices agreeing on any frame. A table
+  // indexed by colour alone silently renders depth into the wrong image the
+  // first time they diverge. With no depth layer M is 1 and this degenerates
+  // to exactly the N framebuffers that were here before.
+  std::vector<VkFramebuffer> framebuffers;
 };
 
 class VkContext {
@@ -44,7 +57,8 @@ class VkContext {
 
   // Frame recording: one command buffer per frame, both eyes, one submit.
   VkCommandBuffer BeginFrameCommands();
-  void BeginEyePass(VkCommandBuffer cmd, int eye, uint32_t image_index);
+  void BeginEyePass(VkCommandBuffer cmd, int eye, uint32_t color_index,
+                    uint32_t depth_index);
   void EndEyePass(VkCommandBuffer cmd);
   // Submits and does NOT wait — the wait is the vkWaitForFences at the top
   // of the next BeginFrameCommands. It was called SubmitAndWait, which put

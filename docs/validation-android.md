@@ -311,6 +311,21 @@ fields there, each with the measurement that chose it written beside it.
 most likely to move on the first on-device session**; when one does,
 re-record that scene's baseline in the same commit and say which number moved.
 
+## Behaviour changed by the Linux-client landing
+
+Android has no hardware to re-verify on, so changes reaching it are listed
+rather than assumed harmless:
+
+- the `oculus/touch_controller` hard-fail is gone (≥1 accepted profile now
+  suffices), and `khr/generic_controller` is suggested where advertised;
+- `XR_KHR_composition_layer_depth` is **enabled and depth is submitted** where
+  the runtime advertises it — which Quest does. The render pass stores depth
+  instead of discarding it, so expect a small bandwidth cost on a tiler and,
+  in exchange, reprojection that has something to work with. A runtime without
+  the extension keeps the app-owned depth image and the `DONT_CARE` store;
+- teardown order is XR-then-Vulkan (was the reverse, a latent use-after-free);
+- one new `VALID && !TRACKED` warning line.
+
 ## 5. Soak
 
 **Status: UN-RUN** — `blocked on: a physical headset.`

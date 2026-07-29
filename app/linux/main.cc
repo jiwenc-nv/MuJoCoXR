@@ -407,6 +407,10 @@ int main(int argc, char** argv) {
     }
 
     std::vector<XrCompositionLayerProjectionView> proj_views;
+    // MUST LIVE AS LONG AS proj_views, because it is chained into it by
+    // POINTER and the runtime reads it inside xrEndFrame. Declared here, in
+    // the same scope, for exactly that reason — see XrShell::ChainDepthInfo.
+    std::vector<XrCompositionLayerDepthInfoKHR> depth_infos;
     if (frame_state.shouldRender) {
       std::vector<XrView> views;
       if (xr.LocateViews(frame_state.predictedDisplayTime, &views)) {
@@ -414,9 +418,11 @@ int main(int argc, char** argv) {
         VkCommandBuffer cmd = vk.BeginFrameCommands();
         proj_views.resize(views.size());
         std::vector<uint32_t> image_indices(views.size());
+        std::vector<uint32_t> depth_indices(views.size(), 0);
         for (size_t i = 0; i < views.size(); ++i) {
           if (!xr.AcquireSwapchainImage(static_cast<int>(i),
-                                        &image_indices[i])) {
+                                        &image_indices[i]) ||
+              !xr.AcquireDepthImage(static_cast<int>(i), &depth_indices[i])) {
             proj_views.clear();
             break;
           }
@@ -430,16 +436,21 @@ int main(int argc, char** argv) {
           if (scene_ready) {
             renderer.SetEye(static_cast<int>(i), views[i].pose, views[i].fov);
           }
-          vk.BeginEyePass(cmd, static_cast<int>(i), image_indices[i]);
+          vk.BeginEyePass(cmd, static_cast<int>(i), image_indices[i],
+                          depth_indices[i]);
           if (scn) {
             renderer.Draw(cmd, static_cast<int>(i), scn);
           }
           vk.EndEyePass(cmd);
         }
         if (!proj_views.empty()) {
+          // Chained BEFORE the release: the depth info describes the image
+          // being released, and after EndFrame neither is ours again.
+          xr.ChainDepthInfo(&proj_views, &depth_infos);
           vk.Submit(cmd);
           for (size_t i = 0; i < views.size(); ++i) {
             xr.ReleaseSwapchainImage(static_cast<int>(i));
+            xr.ReleaseDepthImage(static_cast<int>(i));
           }
         }
       }
