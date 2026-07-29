@@ -115,7 +115,8 @@ endif()
 # because those names are also the table's vocabulary in a dozen comments and
 # two error messages ("give the rows distinct tcp_body names").
 #
-# Verified clean at the time of writing across all three toolchains.
+# Verified clean at the time of writing across all three toolchains (host
+# gcc/clang, NDK clang, emcc — the Linux app uses the host one).
 # -Wno-missing-field-initializers is not laziness: `VkImageCreateInfo info{
 # VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};` is THE idiom for Vulkan and OpenXR —
 # set sType, zero the rest — and -Wextra flags every one of the ~60 of them in
@@ -186,6 +187,57 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              ${MXR_CORE_SOURCES} ${MXR_CORE_HEADERS})
 
+# THE DUAL OF THE SCAN ABOVE, for the other tier — same mechanism, alternation
+# inverted. app/openxr/ is the OpenXR + Vulkan shell shared by the Android and
+# Linux apps: it EXISTS to name vulkan/ and openxr/, and what it must not name
+# is a platform. Five sites violated this on the day it was written
+# (jni.h, the platform-select define, a forward declaration, a signature and
+# an NDK include, all in xr_shell.{h,cc}); narrowing that seam into
+# app/android/xr_platform.cc is what made the tier real, and this is what
+# keeps it that way.
+#
+# The last alternative is not about platform code at all: it catches an INCLUDE
+# GUARD left behind by a `git mv` into this directory. That mistake compiles
+# clean and is invisible, it survived the first pass here, and none of the
+# other alternatives can see it — `__ANDROID__` does not match
+# `MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_`. It names all three shell directories
+# rather than the one that happened to be the source, because the rule is
+# about A PLATFORM and a file moved here from app/web/ would be the same
+# mistake.
+#
+# IT MATCHES MORE THAN #include, because only two of those five were includes.
+# The platform-select define changes which structs openxr_platform.h even
+# declares, and `android_app` appeared as a forward declaration and in a
+# signature — emitting no symbol and pulling in no header, so neither the
+# linker nor an include-only scan could see them.
+#
+# In the COMMON PREFIX on purpose: MUJOCOXR_BUILD_LINUX_XR defaults OFF and
+# Android is a cross-build, so a scan inside the tier's own if() would run on
+# almost nobody's machine. Here it runs on `cmake -S . -B build`.
+file(GLOB MXR_OPENXR_SOURCES CONFIGURE_DEPENDS
+     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+     ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/*.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/*.cc)
+foreach(shell_src ${MXR_OPENXR_SOURCES})
+  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/${shell_src} shell_text)
+  if(shell_text MATCHES "#[ \t]*include[ \t]*[<\"](jni\\.h|android/|android_native_app_glue|emscripten/)"
+     OR shell_text MATCHES "XR_USE_PLATFORM_"
+     OR shell_text MATCHES "(android_app|AAssetManager|ALooper|__ANDROID__|__EMSCRIPTEN__|MUJOCOXR_APP_(ANDROID|WEB|LINUX))")
+    message(FATAL_ERROR
+      "${shell_src} names a platform. app/openxr/ is the shared OpenXR + "
+      "Vulkan shell tier: it is compiled for BOTH the Android app and the "
+      "Linux CloudXR client from one source list, and must name only Vulkan "
+      "and OpenXR. Put the platform half in app/android/ or app/linux/ and "
+      "hand it to XrShell as an opaque pointer — see app/android/xr_platform.h."
+      "\n\nIF YOU JUST MOVED A FILE HERE, the hit is more likely its include "
+      "guard than its code: rename MUJOCOXR_APP_<PLATFORM>_* to "
+      "MUJOCOXR_APP_OPENXR_*. That is a different mistake with the same "
+      "message, and it is the one this arm was added for.")
+  endif()
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             ${MXR_OPENXR_SOURCES})
+
 add_library(mxr_core STATIC ${MXR_CORE_SOURCES})
 target_link_libraries(mxr_core PUBLIC mujoco mxr_ik mxr_platform)
 
@@ -232,6 +284,12 @@ endif()
 # mj_loadXML failing on a named path (mxr_last_error / logcat), which is the
 # reason the id travels as a string rather than an index.
 set(MXR_MENAGERIE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/menagerie)
+# THE LINUX APP DEPENDS ON THIS BEING THE BINARY DIRECTORY ITSELF. app/linux
+# resolves its scene root as dirname(/proc/self/exe), so `./build-linux/mujocoxr`
+# finds build-linux/<id>/ar_scene.xml from any working directory with no flag.
+# That holds only because nothing sets CMAKE_RUNTIME_OUTPUT_DIRECTORY here —
+# and upstream MuJoCo DOES set exactly that under EMSCRIPTEN (see the wasm
+# block below), so this is a property of this configuration, not a law.
 set(MXR_STAGE_ROOT ${CMAKE_CURRENT_BINARY_DIR})
 set(MXR_SCENE_IDS)
 
@@ -295,9 +353,19 @@ mxr_stage_scene(so101 robotstudio_so101
   so101.xml    # <- assets/so101/ar_scene.xml includes
   LICENSE)
 
+# OFF by default, and that is a decision rather than caution. Turning it on
+# adds the OpenXR SDK download, a loader build, glslangValidator, libvulkan-dev
+# and libx11-dev — to the configuration that scripts/build-host.sh runs and
+# that README tells you to run before the others. build-host.sh calls itself
+# "the fast correctness loop: ~1 s incremental" and it stays that.
+# scripts/build-linux.sh flips it, and that is where those ~2,000 shared shell
+# lines get their first compile under a host compiler.
+option(MUJOCOXR_BUILD_LINUX_XR "Build the Linux OpenXR (CloudXR) client" OFF)
+
 # Everything above is the common prefix and builds in EVERY configuration —
 # deliberately not an else-branch, so nobody can turn this into
-# if/elseif/else and quietly make the portable core Android-or-web-only.
+# if/elseif/else and quietly make the portable core Android-or-web-only. The
+# Linux client is a FOURTH independent if() below for the same reason.
 if(NOT ANDROID AND NOT EMSCRIPTEN)
   # A plain `cmake -S . -B build-web` with no emcc exits 0, produces no web
   # artifacts and says nothing, which is the worst onboarding failure
@@ -308,6 +376,8 @@ if(NOT ANDROID AND NOT EMSCRIPTEN)
                  "android.toolchain.cmake -DANDROID_ABI=arm64-v8a ...")
   message(STATUS "  emcmake cmake -S . -B build-web "
                  "-DCMAKE_BUILD_TYPE=Release   (for the browser)")
+  message(STATUS "  cmake -S . -B build-linux "
+                 "-DMUJOCOXR_BUILD_LINUX_XR=ON   (for the CloudXR runtime)")
 endif()
 
 if(EMSCRIPTEN)
@@ -450,27 +520,33 @@ if(EMSCRIPTEN)
   add_dependencies(mxr mxr_web_page)
 endif()
 
-if(ANDROID)
-  # No per-target `log` lines here. liblog rides on mxr_platform, which
-  # mxr_ik and mxr_core each carry PUBLIC and `baseline` links directly, so
-  # every binary that can see src/mxr_log.h already has it and `testspeed` —
-  # a verbatim upstream sample that includes none of our headers — correctly
-  # does not. Verified with readelf on all five arm64 binaries. See
-  # mxr_platform above for why that is one declaration instead of four.
-
-  # ---- MuJoCoXR app: NativeActivity + raw OpenXR + Vulkan ----
+if(ANDROID OR MUJOCOXR_BUILD_LINUX_XR)
+  # ---- the shared OpenXR + Vulkan shell tier ----
+  # Two targets consume this: the Android NativeActivity app and the Linux
+  # CloudXR client. They never configure together, so the argument for one
+  # target rather than two source lists is not deduplication of compilation —
+  # it is that the source list, the generated-shader dependency, the include
+  # directories and the Vulkan link choice are declared ONCE and cannot drift
+  # between two configurations nobody builds side by side.
   FetchContent_Declare(
     openxr
     URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.38.tar.gz
   )
   set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
   set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  # MEASURED, and the error without them names nothing you chose:
+  # src/cmake/presentation.cmake runs `pkg_search_module(XCB xcb xcb-glx)`,
+  # which sets XCB_FOUND on finding `xcb` ALONE, so BUILD_WITH_XCB_HEADERS
+  # defaults ON, the loader compiles with XR_USE_PLATFORM_XCB, and
+  # src/common/xr_dependencies.h then includes <xcb/glx.h> — which lives in
+  # libxcb-glx0-dev and is absent from a stock box. We open no window on any
+  # platform, so neither backend is wanted. XLIB stays ON: presentation.cmake
+  # hard-fails when PRESENTATION_BACKEND (default `xlib`) has no headers, so
+  # libx11-dev is a configure-time-only dependency — the loader links Threads
+  # and nothing else. scripts/build-linux.sh preflights it by name.
+  set(BUILD_WITH_XCB_HEADERS OFF CACHE BOOL "" FORCE)
+  set(BUILD_WITH_WAYLAND_HEADERS OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(openxr)
-
-  add_library(native_app_glue STATIC
-    ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
-  target_include_directories(native_app_glue PUBLIC
-    ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
 
   # GLSL -> SPIR-V headers (host glslangValidator; apt: glslang-tools).
   find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
@@ -483,29 +559,87 @@ if(ANDROID)
       COMMAND ${CMAKE_COMMAND} -E make_directory
               ${CMAKE_CURRENT_BINARY_DIR}/shaders
       COMMAND ${GLSLANG_VALIDATOR} -V --vn ${shader_var}_spv -o ${shader_out}
-              ${CMAKE_CURRENT_SOURCE_DIR}/app/android/shaders/${shader}
-      DEPENDS app/android/shaders/${shader})
+              ${CMAKE_CURRENT_SOURCE_DIR}/app/openxr/shaders/${shader}
+      DEPENDS app/openxr/shaders/${shader})
     list(APPEND MXR_SHADER_HEADERS ${shader_out})
   endforeach()
   add_custom_target(mxr_shaders DEPENDS ${MXR_SHADER_HEADERS})
 
-  # Shell only: everything portable arrives via mxr_core, which is the same
-  # target the host build compiles and links, so this list staying short is
-  # the visible measure of how much of the app is shared.
+  # The tier, as a target. Same rule as mxr_core above: what makes it real is
+  # THIS SOURCE LIST, not the directory name — and the scan in the common
+  # prefix is the other half, since a source list cannot see a #define.
+  add_library(mxr_openxr STATIC
+    app/openxr/xr_shell.cc
+    app/openxr/vk_context.cc
+    app/openxr/scene_renderer.cc)
+  add_dependencies(mxr_openxr mxr_shaders)
+  # PUBLIC app/openxr: both shells include xr_shell.h from their own main.cc.
+  # PRIVATE the binary dir: the generated SPIR-V headers are an implementation
+  # detail of scene_renderer.cc and no consumer includes them.
+  target_include_directories(mxr_openxr PUBLIC app/openxr
+                                        PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  # Vulkan arrives differently on the two platforms and this is the only line
+  # that has to know: the NDK ships libvulkan in the sysroot under the bare
+  # name, while on a host it is found and comes with its own include path.
+  if(ANDROID)
+    target_link_libraries(mxr_openxr PUBLIC mxr_core openxr_loader vulkan)
+  else()
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(mxr_openxr PUBLIC mxr_core openxr_loader
+                                            Vulkan::Vulkan)
+  endif()
+endif()
+
+if(ANDROID)
+  # No per-target `log` lines here. liblog rides on mxr_platform, which
+  # mxr_ik and mxr_core each carry PUBLIC and `baseline` links directly, so
+  # every binary that can see src/mxr_log.h already has it and `testspeed` —
+  # a verbatim upstream sample that includes none of our headers — correctly
+  # does not. Verified with readelf on all five arm64 binaries. See
+  # mxr_platform above for why that is one declaration instead of four.
+
+  # ---- MuJoCoXR app: NativeActivity + raw OpenXR + Vulkan ----
+  add_library(native_app_glue STATIC
+    ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+  target_include_directories(native_app_glue PUBLIC
+    ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
+
+  # ANDROID-SPECIFIC ONLY. Everything portable arrives via mxr_core and
+  # everything shared with the Linux client via mxr_openxr — so this list is
+  # the visible measure of how much of the app is shared, and the number is
+  # the measure, so keep it accurate: five files before the OpenXR + Vulkan
+  # half became a tier of its own, three after. The third is xr_platform.cc,
+  # which is not a leftover — it is the platform seam the tier's purity scan
+  # forced out of app/openxr/, and it is why that scan passes with zero
+  # guarded violations rather than five.
   add_library(mujocoxr SHARED
     app/android/main.cc
-    app/android/xr_shell.cc
-    app/android/vk_context.cc
     app/android/assets.cc
-    app/android/scene_renderer.cc)
-  add_dependencies(mujocoxr mxr_shaders)
-  target_include_directories(mujocoxr PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    app/android/xr_platform.cc)
   # `log` is absent on purpose even though app/android/*.cc call LOGI
   # directly: mxr_core carries mxr_platform PUBLIC, so it arrives with the
   # header. `android` is a different library and is genuinely needed here.
+  # openxr_loader and vulkan ride mxr_openxr PUBLIC.
   target_link_libraries(mujocoxr PRIVATE
-    mxr_core openxr_loader native_app_glue vulkan android)
+    mxr_openxr native_app_glue android)
   # NativeActivity resolves ANativeActivity_onCreate from the app glue.
   set_property(TARGET mujocoxr APPEND_STRING PROPERTY
     LINK_FLAGS " -u ANativeActivity_onCreate")
+endif()
+
+# Guarded rather than asserted: the block above is written `ANDROID OR
+# MUJOCOXR_BUILD_LINUX_XR` precisely because both CAN be set, so a bare
+# `if(MUJOCOXR_BUILD_LINUX_XR)` here would claim a disjointness nothing
+# enforces — and a cross-build with the flag left on would try to add a second
+# target named `mujocoxr`.
+if(MUJOCOXR_BUILD_LINUX_XR AND NOT ANDROID AND NOT EMSCRIPTEN)
+  # ---- MuJoCoXR app: desktop OpenXR (CloudXR) + Vulkan ----
+  # LINUX-SPECIFIC ONLY, and there is exactly one file of it. Everything else
+  # arrives via mxr_openxr (the OpenXR + Vulkan shell, shared with Android) and
+  # mxr_core (the portable tier, shared with everything). Reusing the Android
+  # library's target name is deliberate — it is the same app — and the guard
+  # on this if() is what makes the configurations disjoint rather than merely
+  # expected to be.
+  add_executable(mujocoxr app/linux/main.cc)
+  target_link_libraries(mujocoxr PRIVATE mxr_openxr)
 endif()

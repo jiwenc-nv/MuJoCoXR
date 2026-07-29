@@ -414,9 +414,10 @@ void SceneRenderer::Draw(VkCommandBuffer cmd, int eye, const mjvScene* scn) {
 //
 // THE vkDeviceWaitIdle BELOW IS NOW LOAD-BEARING PER SCENE SWITCH, not once
 // at shutdown, and it is the only thing making the switch safe. Read
-// VkContext::SubmitAndWait (vk_context.cc): DESPITE ITS NAME IT DOES NOT
-// WAIT. It calls vkQueueSubmit with frame_fence_ and returns; the fence is
-// waited on at the *next* BeginFrameCommands. So when B is pressed, the
+// VkContext::Submit (vk_context.cc): IT DOES NOT WAIT, and the name now says
+// so — it was SubmitAndWait, which is how this paragraph came to exist. It
+// calls vkQueueSubmit with frame_fence_ and returns; the fence is waited on
+// at the *next* BeginFrameCommands. So when B is pressed, the
 // previous frame's command buffer can still be executing, still referencing
 // the vertex/index buffers and descriptor sets freed a few lines down.
 // Deleting this wait would be invisible on the bench and would corrupt or

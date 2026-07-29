@@ -30,11 +30,12 @@
 //
 // Target rate-limited; DLS + nullspace home bias every frame; the jaw is a
 // direct affine map from the trigger onto the robot's tabulated open/closed
-// endpoints; A = home reset. B never reaches the core — both shells bind it
-// themselves (web ends the session, Android cycles the scene), because
-// switching robots destroys and rebuilds this object and so cannot be a
-// method on it. Auto-disengage on recenter (reviewer advisory) and on lost
-// grip tracking.
+// endpoints; A = home reset. B never reaches the core — the Android and web
+// shells bind it themselves (web ends the session, Android cycles the
+// scene), because switching robots destroys and rebuilds this object and so
+// cannot be a method on it. The Linux shell has no scene cycle at all: it
+// picks a robot with --scene at launch. Auto-disengage on recenter (reviewer
+// advisory) and on lost grip tracking.
 //
 // EVERY per-robot number is read through ik_.spec, which points at the
 // src/robot_spec.c row the model was probed into. Nothing in this class is

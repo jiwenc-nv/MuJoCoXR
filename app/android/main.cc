@@ -22,6 +22,7 @@
 #include "scene_renderer.h"
 #include "sim_scene.h"
 #include "vk_context.h"
+#include "xr_platform.h"
 #include "xr_shell.h"
 
 namespace {
@@ -57,7 +58,18 @@ void android_main(android_app* app) {
 
   XrShell xr;
   VkContext vk;
-  if (!xr.CreateInstance(app)) {
+  // Loader init and the Android create-info chain are the whole of what is
+  // platform-specific about instance creation; app/android/xr_platform.cc owns
+  // both so app/openxr/ can stay platform-free.
+  const void* platform_next = mxr_android_xr_init(app);
+  // 1.0 and a zero wait keep this exactly the call it always was: one
+  // xrGetSystem attempt, no retry. The `have_system()` term is the other half
+  // of that — CreateInstance now returns true with no system so the Linux
+  // client's --probe can report it, and this restores the old verdict here.
+  if (!platform_next ||
+      !xr.CreateInstance(platform_next, mxr_android_xr_extension(),
+                         XR_API_VERSION_1_0, 0) ||
+      !xr.have_system()) {
     LOGE("OpenXR instance creation failed");
     return;
   }
@@ -67,7 +79,8 @@ void android_main(android_app* app) {
             xr.CreateSwapchains({VK_FORMAT_R8G8B8A8_SRGB,
                                  VK_FORMAT_B8G8R8A8_SRGB,
                                  VK_FORMAT_R8G8B8A8_UNORM}) &&
-            xr.CreateActions() && vk.InitRenderTargets(&xr);
+            xr.CreateActions() && xr.AttachActions() &&
+            vk.InitRenderTargets(&xr);
   if (!ok) {
     LOGE("XR/Vulkan bring-up failed");
     xr.Destroy();
@@ -107,7 +120,7 @@ void android_main(android_app* app) {
   //
   // THE ONE STEP THAT IS LOAD-BEARING TODAY is inside SceneRenderer::Destroy,
   // and it is a GPU synchronisation rather than a CPU ordering. See the
-  // comment above that function: VkContext::SubmitAndWait does not wait
+  // comment above that function: VkContext::Submit does not wait
   // despite its name, so the previous frame's command buffer may still be
   // executing when B is pressed.
   //
@@ -166,18 +179,8 @@ void android_main(android_app* app) {
   // B is a raw level; the edge is derived here. Starts true so a B already
   // held as the session comes up cannot cycle the scene on frame one.
   bool b_prev = true;
-  // Absolute display time in nanoseconds, converted to seconds exactly once,
-  // right here. The int64 epoch is subtracted BEFORE the conversion:
-  // predictedDisplayTime is ~1e18 ns, and a*1e-9 - b*1e-9 is not the same
-  // double as (a-b)*1e-9. This makes the dt the core derives accurate, not
-  // exact — (t3-e)*1e-9 - (t2-e)*1e-9 is still a difference of two rounded
-  // doubles, ~1e-13 s once a session has been up for hours. That is 7 orders
-  // below one 72 Hz frame and does not accumulate, because the accumulator
-  // keeps its sub-timestep residual.
-  XrTime time_epoch = 0;
 
   bool exit_loop = false;
-  bool session_was_running = false;
   int64_t frame_count = 0;
   while (!app->destroyRequested && !exit_loop) {
     // Drain Android lifecycle events; block when idle (no session).
@@ -202,17 +205,15 @@ void android_main(android_app* app) {
       // loop merely `continue`d, so an HMD sleep/wake mid-clutch resumed
       // with engaged_ still true over a p_c0_ from before the sleep, and
       // with last_display_s_ from before it too — one clamped 0.1 s dt and
-      // a `sim deficit` line on the first resumed frame. session_running_
-      // is cleared only on STOPPING / EXITING / LOSS_PENDING
-      // (xr_shell.cc:475-486), never by VISIBLE/SYNCHRONIZED, so this edge
-      // fires once per real session end and not on focus changes.
-      if (session_was_running) {
-        session_was_running = false;
+      // a `sim deficit` line on the first resumed frame. The edge is latched
+      // in XrShell on the STOPPING / EXITING / LOSS_PENDING transitions and
+      // never by VISIBLE/SYNCHRONIZED, so it fires once per real session end
+      // and not on focus changes.
+      if (xr.TakeSessionEndEdge()) {
         sim.EndSession();
       }
       continue;
     }
-    session_was_running = true;
 
     XrFrameState frame_state;
     if (!xr.WaitBeginFrame(&frame_state)) {
@@ -234,11 +235,7 @@ void android_main(android_app* app) {
     }
     b_prev = b_now;
 
-    if (time_epoch == 0) {
-      time_epoch = frame_state.predictedDisplayTime;
-    }
-    sim.Advance(input,
-                (frame_state.predictedDisplayTime - time_epoch)*1e-9);
+    sim.Advance(input, xr.display_time_s(frame_state.predictedDisplayTime));
 
     if (++frame_count % 72 == 0 && input.grip_valid) {
       LOGI("grip p=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f) trig=%.2f "
@@ -279,7 +276,7 @@ void android_main(android_app* app) {
           vk.EndEyePass(cmd);
         }
         if (!proj_views.empty()) {
-          vk.SubmitAndWait(cmd);
+          vk.Submit(cmd);
           for (size_t i = 0; i < views.size(); ++i) {
             xr.ReleaseSwapchainImage(static_cast<int>(i));
           }
@@ -297,7 +294,16 @@ void android_main(android_app* app) {
   if (model) {
     mj_deleteModel(model);
   }
-  vk.Destroy();
+  // XR BEFORE VULKAN, and this order is a fix rather than a preference: it
+  // used to be the other way round. The XR swapchain images are VkImages the
+  // RUNTIME created on the device below, so xrDestroySwapchain and
+  // xrDestroySession dereference that device — destroying it first is a
+  // use-after-free inside the runtime. Nothing here ever ran, so nothing ever
+  // caught it; the Linux shell ran, and took SIGSEGV on this exact sequence on
+  // its first Ctrl-C. WaitIdle first, because the last frame may still be in
+  // flight. See app/linux/main.cc for the same three lines.
+  vk.WaitIdle();
   xr.Destroy();
+  vk.Destroy();
   LOGI("MuJoCoXR exiting");
 }

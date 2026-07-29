@@ -92,8 +92,8 @@ void Teleop::Reset(const mjModel* m, mjData* d) {
 void Teleop::Update(const mjModel* m, mjData* d, const InputState& input,
                     double dt) {
   ++frame_;
-  // A is reported as a raw level; the edge is derived here so both shells
-  // share one definition. Suppressed on the first frame so a button already
+  // A is reported as a raw level; the edge is derived here so every shell
+  // shares one definition. Suppressed on the first frame so a button already
   // held at session start does not fire a reset.
   const bool a_edge = input.a_down && !a_down_prev_ && frame_ > 1;
   a_down_prev_ = input.a_down;

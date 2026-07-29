@@ -188,8 +188,8 @@ MXR_ABI_EXPORT int mxr_viewport_ints(void);   // int32s PER VIEW
 // the strides only because they share the query-once lifetime.
 //
 // Clip planes, in metres, for XRSession.updateRenderState. Queried for the
-// same reason every stride is: src/mesh_buffers.h owns these two numbers on
-// both targets, and WebXR's defaults (0.1 / 1000) clip the gripper at arm's
+// same reason every stride is: src/mesh_buffers.h owns these two numbers for
+// every renderer, and WebXR's defaults (0.1 / 1000) clip the gripper at arm's
 // length. A JS literal here would be the one value agreed rather than
 // queried, and drift would be undetectable because nothing on this target
 // reads the C constants.

@@ -1,7 +1,9 @@
 #include "xr_shell.h"
 
-#include <android_native_app_glue.h>
+#include <ctime>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "mxr_log.h"
@@ -26,21 +28,97 @@ bool LoadXrFn(XrInstance instance, const char* name, Fn* fn) {
 
 }  // namespace
 
-bool XrShell::CreateInstance(android_app* app) {
-  // Android mandates explicit loader initialization before any other call.
-  PFN_xrInitializeLoaderKHR init_loader = nullptr;
-  if (!LoadXrFn(XR_NULL_HANDLE, "xrInitializeLoaderKHR", &init_loader)) {
-    return false;
-  }
-  XrLoaderInitInfoAndroidKHR loader_info{XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
-  loader_info.applicationVM = app->activity->vm;
-  loader_info.applicationContext = app->activity->clazz;
-  if (!XrOk(init_loader(reinterpret_cast<XrLoaderInitInfoBaseHeaderKHR*>(
-                &loader_info)),
-            "xrInitializeLoaderKHR")) {
-    return false;
-  }
+// xrGetSystem, with a bounded retry for the one XrResult that means "come
+// back later". `system_wait_s` <= 0 makes exactly one attempt, which is what
+// Android passes and why its behaviour here is unchanged.
+//
+// Returns false only on a HARD failure. A deadline that expires leaves
+// system_id_ == XR_NULL_SYSTEM_ID and returns true, so the caller can decide.
+bool XrShell::WaitForSystem(int system_wait_s) {
+  XrSystemGetInfo sys{XR_TYPE_SYSTEM_GET_INFO};
+  sys.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
 
+  const int64_t deadline_ms =
+      system_wait_s > 0 ? static_cast<int64_t>(system_wait_s)*1000 : 0;
+  // MEASURED, not counted. Accumulating a nominal 200 per sleep is wrong on
+  // two counts: nanosleep returns early on a signal, and a shell that installs
+  // handlers before this call (which it must — see set_abort_flag) makes that
+  // the normal case rather than a curiosity. A monotonic origin is right
+  // whatever the sleep actually did.
+  struct timespec origin;
+  clock_gettime(CLOCK_MONOTONIC, &origin);
+  auto elapsed_ms = [&origin]() {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<int64_t>(now.tv_sec - origin.tv_sec)*1000 +
+           (now.tv_nsec - origin.tv_nsec)/1000000;
+  };
+
+  int64_t last_log_ms = -3000;
+  while (true) {
+    system_result_ = xrGetSystem(instance_, &sys, &system_id_);
+    if (XR_SUCCEEDED(system_result_)) {
+      const int64_t waited = elapsed_ms();
+      if (waited >= 1000) {
+        LOGI("system available after %lld.%llds",
+             static_cast<long long>(waited/1000),
+             static_cast<long long>((waited%1000)/100));
+      }
+      // Reported rather than judged: a streaming runtime answers this from a
+      // virtual device with nothing worn, so the NAME is what tells a reader
+      // which of those two situations they are in.
+      XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
+      if (XR_SUCCEEDED(xrGetSystemProperties(instance_, system_id_, &props))) {
+        // snprintf, not strncpy: both buffers are
+        // XR_MAX_SYSTEM_NAME_SIZE, so a 255-char name makes strncpy copy
+        // exactly the buffer minus one with no terminator in the source
+        // range, which -Wstringop-truncation flags and is right to.
+        snprintf(system_name_, sizeof(system_name_), "%s",
+                 props.systemName);
+      }
+      return true;
+    }
+    // THE OTHER MEASURED FAILURE. Unlike RUNTIME_UNAVAILABLE this one is
+    // transient by construction on a streaming runtime: the service is up and
+    // answering, and it will start reporting a system the moment a headset
+    // attaches. Retrying anything else would hide a real fault.
+    if (system_result_ != XR_ERROR_FORM_FACTOR_UNAVAILABLE) {
+      if (system_result_ == XR_ERROR_FORM_FACTOR_UNSUPPORTED) {
+        LOGE("xrGetSystem: this runtime does not support a head-mounted "
+             "display form factor at all (%d) — not a missing headset",
+             system_result_);
+      } else {
+        LOGE("xrGetSystem failed: %d", system_result_);
+      }
+      system_id_ = XR_NULL_SYSTEM_ID;
+      return false;
+    }
+    if (abort_flag_ && *abort_flag_) {
+      LOGI("interrupted while waiting for a system");
+      system_id_ = XR_NULL_SYSTEM_ID;
+      return false;
+    }
+    const int64_t waited_ms = elapsed_ms();
+    if (waited_ms >= deadline_ms) {
+      LOGE("xrGetSystem: XR_ERROR_FORM_FACTOR_UNAVAILABLE (%d) — the runtime "
+           "is running but no headset has connected%s", system_result_,
+           deadline_ms > 0 ? " within the timeout" : "");
+      system_id_ = XR_NULL_SYSTEM_ID;
+      return true;
+    }
+    if (waited_ms - last_log_ms >= 3000) {
+      LOGI("waiting for a headset to connect... (%llds of %ds)",
+           static_cast<long long>(waited_ms/1000), system_wait_s);
+      last_log_ms = waited_ms;
+    }
+    struct timespec ts = {0, 200*1000*1000};  // 200 ms
+    nanosleep(&ts, nullptr);
+  }
+}
+
+bool XrShell::CreateInstance(const void* platform_next,
+                             const char* platform_ext, XrVersion api_version,
+                             int system_wait_s) {
   // XR_EXT_local_floor is required by the design (fallback chain at space
   // creation); probe for it so a missing runtime extension degrades cleanly.
   uint32_t ext_count = 0;
@@ -51,56 +129,117 @@ bool XrShell::CreateInstance(android_app* app) {
                                          exts.data());
   for (const auto& e : exts) {
     if (!strcmp(e.extensionName, XR_EXT_LOCAL_FLOOR_EXTENSION_NAME)) {
-      local_floor_available_ = true;
+      local_floor_ext_ = true;
     }
     // Pico controllers use ByteDance's own interaction profiles.
     if (!strcmp(e.extensionName, "XR_BD_controller_interaction")) {
       bd_controllers_available_ = true;
     }
+    // khr/generic_controller — the fallback that actually works. Unlike
+    // khr/simple_controller it carries an analog trigger AND an analog
+    // squeeze, so the gripper and the clutch both function on a runtime that
+    // binds nothing more specific. Probed rather than assumed for the same
+    // reason as the two above: xrCreateInstance returns
+    // XR_ERROR_EXTENSION_NOT_PRESENT for ANY unadvertised name in the enabled
+    // list, so an unconditional entry here is a hard startup failure on every
+    // runtime that lacks it — including, for all anyone here can check, Quest.
+    //
+    // A string literal because it postdates the pinned OpenXR-SDK 1.1.38:
+    // there is no XR_KHR_GENERIC_CONTROLLER_EXTENSION_NAME macro to use, and
+    // it is absent from that SDK's registry. Same precedent as the line above.
+    if (!strcmp(e.extensionName, "XR_KHR_generic_controller")) {
+      generic_controller_available_ = true;
+    }
   }
 
-  std::vector<const char*> enabled = {
-      XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
-      XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
-  };
-  if (local_floor_available_) {
+  // platform_ext FIRST, so the enabled list is byte-for-byte what it was when
+  // XR_KHR_android_create_instance was spelled here literally.
+  std::vector<const char*> enabled;
+  if (platform_ext) {
+    enabled.push_back(platform_ext);
+  }
+  enabled.push_back(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
+  if (local_floor_ext_) {
     enabled.push_back(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME);
   }
   if (bd_controllers_available_) {
     enabled.push_back("XR_BD_controller_interaction");
   }
-
-  XrInstanceCreateInfoAndroidKHR android_info{
-      XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
-  android_info.applicationVM = app->activity->vm;
-  android_info.applicationActivity = app->activity->clazz;
+  if (generic_controller_available_) {
+    enabled.push_back("XR_KHR_generic_controller");
+  }
 
   XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
-  info.next = &android_info;
+  info.next = platform_next;
   strncpy(info.applicationInfo.applicationName, "MuJoCoXR",
           XR_MAX_APPLICATION_NAME_SIZE - 1);
   info.applicationInfo.applicationVersion = 1;
   strncpy(info.applicationInfo.engineName, "none",
           XR_MAX_ENGINE_NAME_SIZE - 1);
-  info.applicationInfo.apiVersion = XR_API_VERSION_1_0;
+  info.applicationInfo.apiVersion = api_version;
   info.enabledExtensionCount = static_cast<uint32_t>(enabled.size());
   info.enabledExtensionNames = enabled.data();
-  if (!XrOk(xrCreateInstance(&info, &instance_), "xrCreateInstance")) {
-    return false;
-  }
+  XrResult r = xrCreateInstance(&info, &instance_);
 
-  XrSystemGetInfo sys{XR_TYPE_SYSTEM_GET_INFO};
-  sys.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-  if (!XrOk(xrGetSystem(instance_, &sys, &system_id_), "xrGetSystem")) {
+  // THE 1.1 REQUEST IS NOT COSMETIC AND NEITHER IS THIS FALLBACK. At 1.1
+  // LOCAL_FLOOR is a core reference space needing no extension, which on a
+  // runtime that does not advertise XR_EXT_local_floor is the difference
+  // between a floor-referenced app space and the STAGE fallback. So a
+  // downgrade is a DEGRADED CLIENT, not a formality, and it says so.
+  if (r == XR_ERROR_API_VERSION_UNSUPPORTED &&
+      api_version != XR_API_VERSION_1_0) {
+    LOGW("runtime rejected OpenXR %u.%u; retrying at 1.0. LOCAL_FLOOR is core "
+         "only at 1.1, so this client will fall back to STAGE and the floor "
+         "datum may be wrong — read the `reference space:` line below",
+         XR_VERSION_MAJOR(api_version), XR_VERSION_MINOR(api_version));
+    api_version = XR_API_VERSION_1_0;
+    info.applicationInfo.apiVersion = api_version;
+    r = xrCreateInstance(&info, &instance_);
+  }
+  instance_result_ = r;
+  if (XR_FAILED(r)) {
+    // TWO FAILURES THAT LOOK THE SAME AND ARE NOT, and only one of them is
+    // this tier's business. RUNTIME_UNAVAILABLE means the runtime named by
+    // XR_RUNTIME_JSON did not come up — which is true of every OpenXR runtime
+    // and so belongs here — but WHY it did not is entirely runtime-specific,
+    // and this tier has no business knowing that any particular one exists.
+    // The shell that does know reads instance_result() and says so; see
+    // app/linux/main.cc. What stays here is the one thing a shell cannot
+    // recover after the fact: the value the LOADER actually used.
+    if (r == XR_ERROR_RUNTIME_UNAVAILABLE) {
+      const char* manifest = getenv("XR_RUNTIME_JSON");
+      LOGE("xrCreateInstance: XR_ERROR_RUNTIME_UNAVAILABLE (%d) — a runtime "
+           "manifest was found but the runtime behind it did not come up", r);
+      LOGE("  XR_RUNTIME_JSON = %s",
+           manifest ? manifest : "(unset — the loader searched its default "
+                                 "paths)");
+    } else {
+      LOGE("xrCreateInstance failed: %d", r);
+    }
     return false;
   }
+  // THE GRANTED VERSION, not the requested one — the fallback above may have
+  // moved it, and the reference-space predicate reads this member.
+  api_version_ = api_version;
 
   XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
   xrGetInstanceProperties(instance_, &props);
-  LOGI("OpenXR runtime: %s %u.%u.%u (local_floor=%d)", props.runtimeName,
+  LOGI("OpenXR runtime: %s %u.%u.%u, API %u.%u granted (local_floor_ext=%d)",
+       props.runtimeName,
        XR_VERSION_MAJOR(props.runtimeVersion),
        XR_VERSION_MINOR(props.runtimeVersion),
-       XR_VERSION_PATCH(props.runtimeVersion), local_floor_available_);
+       XR_VERSION_PATCH(props.runtimeVersion),
+       XR_VERSION_MAJOR(api_version_), XR_VERSION_MINOR(api_version_),
+       local_floor_ext_);
+
+  if (!WaitForSystem(system_wait_s)) {
+    return false;
+  }
+  // The caller decides whether a missing system is fatal: --probe reports it,
+  // everything else refuses to continue. See have_system().
+  if (system_id_ == XR_NULL_SYSTEM_ID) {
+    return true;
+  }
 
   // AR: prefer alpha-blend (video passthrough behind rendered alpha).
   uint32_t nmodes = 0;
@@ -214,7 +353,26 @@ bool XrShell::CreateAppSpace() {
                                   XR_REFERENCE_SPACE_TYPE_STAGE,
                                   XR_REFERENCE_SPACE_TYPE_LOCAL};
   const char* names[] = {"LOCAL_FLOOR", "STAGE", "LOCAL"};
-  for (int i = local_floor_available_ ? 0 : 1; i < 3; ++i) {
+  // TWO WAYS TO BE ALLOWED TO ASK FOR LOCAL_FLOOR, and this used to know only
+  // one. XR_EXT_local_floor was promoted into OpenXR 1.1, where the space is
+  // core and no extension is advertised for it — so on a 1.1 instance the
+  // extension probe reports false and the loop would have skipped straight to
+  // STAGE, concluding the floor is unavailable on a runtime that offers it.
+  // That is not hypothetical: it is exactly the CloudXR case this shell was
+  // extended for. XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT below is the same
+  // enum value as the 1.1 core name, so the array needs no second entry.
+  // MAJOR.MINOR ONLY. XrVersion packs a patch field, and api_version_ holds
+  // whatever was granted, so comparing the whole word is right only while the
+  // caller happens to pass the same patch this header was built with. A
+  // XR_MAKE_VERSION(1,1,0) would silently compare LOW and drop to STAGE with
+  // no log line — the exact silent-wrong-floor failure this predicate exists
+  // to prevent. Monado compares major.minor for the same reason.
+  const bool api_at_least_1_1 =
+      XR_VERSION_MAJOR(api_version_) > 1 ||
+      (XR_VERSION_MAJOR(api_version_) == 1 &&
+       XR_VERSION_MINOR(api_version_) >= 1);
+  const bool local_floor_ok = local_floor_ext_ || api_at_least_1_1;
+  for (int i = local_floor_ok ? 0 : 1; i < 3; ++i) {
     XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     info.referenceSpaceType = order[i];
     info.poseInReferenceSpace = {{0, 0, 0, 1}, {0, 0, 0}};
@@ -351,31 +509,53 @@ bool XrShell::CreateActions() {
     s.countSuggestedBindings = static_cast<uint32_t>(b.size());
     XrResult r = xrSuggestInteractionProfileBindings(instance_, &s);
     if (XR_FAILED(r)) {
-      LOGW("suggest bindings %s failed: %d", profile_path, r);
+      LOGW("interaction profile %s: REJECTED (%d)", profile_path, r);
       return false;
     }
-    LOGI("suggested bindings: %s", profile_path);
+    ++profiles_accepted_;
+    LOGI("interaction profile %s: accepted", profile_path);
     return true;
   };
+  // THE THIRD OUTCOME, and the reason it gets a line of its own: a count of
+  // accepted profiles cannot distinguish "the runtime refused it" from "we
+  // never offered it", and the ones we skip are skipped precisely because
+  // their defining extension is absent — which is the interesting case.
+  auto not_offered = [](const char* profile_path, const char* ext) {
+    LOGI("interaction profile %s: not offered (%s not advertised)",
+         profile_path, ext);
+  };
 
-  if (!suggest("/interaction_profiles/oculus/touch_controller",
-               {{grip_action_, path("/user/hand/right/input/grip/pose")},
-                {trigger_action_, path("/user/hand/right/input/trigger/value")},
-                {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
-                {a_action_, path("/user/hand/right/input/a/click")},
-                {b_action_, path("/user/hand/right/input/b/click")},
-                {grip_action_, path("/user/hand/left/input/grip/pose")},
-                {trigger_action_, path("/user/hand/left/input/trigger/value")},
-                {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
-                {a_action_, path("/user/hand/left/input/x/click")},
-                {b_action_, path("/user/hand/left/input/y/click")}})) {
-    return false;  // core profile: failure means the setup itself is broken
-  }
+  // NO SINGLE PROFILE IS MANDATORY, and this used to say the opposite: a
+  // failed oculus/touch_controller suggestion returned false and killed
+  // bring-up, on the reasoning that a core profile failing means the setup is
+  // broken. Two things make that the wrong bet now. The profile a runtime
+  // ACCEPTS SUGGESTIONS FOR and the profile it BINDS TO A DEVICE are different
+  // questions, so a rejection here says nothing about whether a controller
+  // works; and this shell now runs against a streaming runtime whose accepted
+  // set is a build-time property of somebody else's binary. The check that
+  // survives is the one that means something: at least one profile took.
+  //
+  // Which profile actually bound is a separate, louder line —
+  // LogInteractionProfiles() at FOCUSED. Read that one, not these.
+  suggest("/interaction_profiles/oculus/touch_controller",
+          {{grip_action_, path("/user/hand/right/input/grip/pose")},
+           {trigger_action_, path("/user/hand/right/input/trigger/value")},
+           {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
+           {a_action_, path("/user/hand/right/input/a/click")},
+           {b_action_, path("/user/hand/right/input/b/click")},
+           {grip_action_, path("/user/hand/left/input/grip/pose")},
+           {trigger_action_, path("/user/hand/left/input/trigger/value")},
+           {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
+           {a_action_, path("/user/hand/left/input/x/click")},
+           {b_action_, path("/user/hand/left/input/y/click")}});
 
   // Pico (ByteDance) native profiles — Pico 4 and Pico 4 Ultra/4S. Grip is
   // bound to both squeeze/value and squeeze/click (floats combine by max;
   // click arrives as 0/1 where the analog source is absent).
-  if (bd_controllers_available_) {
+  if (!bd_controllers_available_) {
+    not_offered("/interaction_profiles/bytedance/pico4*_controller",
+                "XR_BD_controller_interaction");
+  } else {
     for (const char* p :
          {"/interaction_profiles/bytedance/pico4_controller",
           "/interaction_profiles/bytedance/pico4s_controller"}) {
@@ -396,6 +576,29 @@ bool XrShell::CreateActions() {
     }
   }
 
+  // khr/generic_controller — THE FALLBACK THAT KEEPS EVERY ACTION WORKING,
+  // and the reason it is worth enabling an extension for. Component paths read
+  // off this runtime's own binding table rather than guessed: `primary` and
+  // `secondary` are its two buttons, NOT a/b and NOT menu, so A (reset) and B
+  // (scene cycle) both land — which khr/simple_controller below cannot do,
+  // having no second button and no analog axes at all.
+  if (generic_controller_available_) {
+    suggest("/interaction_profiles/khr/generic_controller",
+            {{grip_action_, path("/user/hand/right/input/grip/pose")},
+             {trigger_action_, path("/user/hand/right/input/trigger/value")},
+             {squeeze_action_, path("/user/hand/right/input/squeeze/value")},
+             {a_action_, path("/user/hand/right/input/primary/click")},
+             {b_action_, path("/user/hand/right/input/secondary/click")},
+             {grip_action_, path("/user/hand/left/input/grip/pose")},
+             {trigger_action_, path("/user/hand/left/input/trigger/value")},
+             {squeeze_action_, path("/user/hand/left/input/squeeze/value")},
+             {a_action_, path("/user/hand/left/input/primary/click")},
+             {b_action_, path("/user/hand/left/input/secondary/click")}});
+  } else {
+    not_offered("/interaction_profiles/khr/generic_controller",
+                "XR_KHR_generic_controller");
+  }
+
   // Last-resort fallback: khr/simple_controller — select (0/1 float
   // conversion) drives the clutch, menu resets; no analog gripper exists.
   suggest("/interaction_profiles/khr/simple_controller",
@@ -406,6 +609,32 @@ bool XrShell::CreateActions() {
            {squeeze_action_, path("/user/hand/left/input/select/click")},
            {a_action_, path("/user/hand/left/input/menu/click")}});
 
+  // The one binding check that survives. khr/simple_controller is mandatory
+  // for every conformant runtime, so zero here is not "an unusual headset" —
+  // it is a broken instance or a broken action set, and continuing would
+  // produce a session that renders and never moves.
+  if (profiles_accepted_ == 0) {
+    LOGE("no interaction profile accepted a single suggestion — controller "
+         "input cannot work; refusing to continue");
+    return false;
+  }
+  LOGI("interaction profiles accepted: %d", profiles_accepted_);
+  return true;
+}
+
+// The session-scope half of what used to be one function. THE SPLIT IS THE
+// SPEC'S OWN: xrCreateActionSet, xrCreateAction and
+// xrSuggestInteractionProfileBindings all take an XrInstance, while the two
+// calls below take an XrSession — so everything above runs with no headset
+// attached, and that is the only reason the interaction-profile work in this
+// file can be checked at all before hardware exists (app/linux --probe).
+//
+// Android still calls CreateActions() then AttachActions() back to back after
+// CreateSession(), so ITS order of OpenXR calls is unchanged. app/linux does
+// not, and that is the point rather than an inconsistency: it calls
+// CreateActions() before there is a session at all, which is what lets --probe
+// report the whole interaction-profile decision on a machine with no headset.
+bool XrShell::AttachActions() {
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
   attach.actionSets = &action_set_;
@@ -479,7 +708,15 @@ void XrShell::HandleSessionStateChange(
       break;
     }
     case XR_SESSION_STATE_STOPPING:
-      session_running_ = false;
+      // THE GUARD IS NOT DECORATION. Both sites below used to write
+      // session_running_ = false unconditionally, and the shells absorbed the
+      // difference in a `session_was_running` local. Latching the edge here
+      // instead means it has to fire on a TRANSITION — LOSS_PENDING arriving
+      // when the session never began must not manufacture a session end.
+      if (session_running_) {
+        session_running_ = false;
+        session_end_edge_ = true;
+      }
       XrOk(xrEndSession(session_), "xrEndSession");
       LOGI("session stopped");
       break;
@@ -488,7 +725,10 @@ void XrShell::HandleSessionStateChange(
       break;
     case XR_SESSION_STATE_EXITING:
     case XR_SESSION_STATE_LOSS_PENDING:
-      session_running_ = false;
+      if (session_running_) {
+        session_running_ = false;
+        session_end_edge_ = true;
+      }
       *exit_render_loop = true;
       break;
     default:
@@ -618,14 +858,20 @@ void XrShell::SyncInput(XrTime time, InputState* input) {
   }
 
   // First hand with a valid grip pose wins (0 = right, 1 = left).
+  constexpr XrSpaceLocationFlags kValid =
+      XR_SPACE_LOCATION_POSITION_VALID_BIT |
+      XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+  constexpr XrSpaceLocationFlags kTracked =
+      XR_SPACE_LOCATION_POSITION_TRACKED_BIT |
+      XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+  // Carried out of the loop only so the diagnostic at the bottom can read it.
+  XrSpaceLocationFlags grip_flags = 0;
   int hand = -1;
   for (int h = 0; h < 2 && hand < 0; ++h) {
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
     if (XR_SUCCEEDED(xrLocateSpace(grip_spaces_[h], app_space_, time, &loc))) {
-      constexpr XrSpaceLocationFlags kValid =
-          XR_SPACE_LOCATION_POSITION_VALID_BIT |
-          XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
       if ((loc.locationFlags & kValid) == kValid) {
+        grip_flags = loc.locationFlags;
         input->grip_valid = true;
         // Field by field, never memcpy: XrPosef is {orientation, position}
         // — orientation FIRST — while InputState leads with position. A
@@ -687,11 +933,41 @@ void XrShell::SyncInput(XrTime time, InputState* input) {
     b_down_ = bb.currentState;
   }
 
+  // EVERY FRAME, not once in 90 — the same shape as SimScene's zero_dt_run_
+  // and Teleop's recenter_run_, and for the same reason. A pose that is VALID
+  // but NOT TRACKED is a stale pose presented as live, and the mask above
+  // deliberately does not reject it: CloudXR ages a controller measurement out
+  // in two stages — TRACKED clears at 100 ms, VALID at 200 ms — so between
+  // those the runtime keeps handing back the last pose it received while the
+  // operator's hand has moved on. Held through a clutch, the target sits still
+  // and then jumps on recovery.
+  //
+  // Sampling this inside the 1.25 s periodic block would have caught a 100 ms
+  // window roughly one time in ten, which is worse than not looking: it is
+  // supposed to be the TRIGGER for adding the TRACKED bits to kValid, and it
+  // is what someone greps for after seeing the target jump. A trigger that
+  // misses nine events in ten is not a trigger.
+  //
+  // This LOOKS rather than fixes, on purpose. Widening kValid is the
+  // spec-correct change, but it is shared-tier behaviour that also ships to
+  // Android, where nobody can re-verify it.
+  if (input->grip_valid && (grip_flags & kTracked) != kTracked) {
+    ++not_tracked_frames_;
+    if (++not_tracked_run_ == 1) {
+      LOGW("input: grip pose VALID but NOT TRACKED (flags 0x%llx) — the "
+           "runtime is serving a stale pose; treat target motion as suspect",
+           static_cast<unsigned long long>(grip_flags));
+    }
+  } else {
+    not_tracked_run_ = 0;
+  }
+
   if (sync_count_ % 90 == 0) {
-    LOGI("input: hand=%s grip_valid=%d sqz=%.2f(active=%d) trig=%.2f(active=%d)",
+    LOGI("input: hand=%s grip_valid=%d sqz=%.2f(active=%d) trig=%.2f(active=%d)"
+         " not_tracked_total=%lld",
          hand < 0 ? "none" : (hand == 0 ? "right" : "left"),
          input->grip_valid, input->squeeze, sqz_active, input->trigger,
-         trig_active);
+         trig_active, static_cast<long long>(not_tracked_frames_));
   }
 }
 

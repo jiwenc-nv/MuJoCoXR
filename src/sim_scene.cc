@@ -5,7 +5,7 @@
 namespace {
 
 // World-axes gizmo decor. This lives in the core, not in a shell, because it
-// IS the handedness gate: two shells with divergent axis->colour mappings
+// IS the handedness gate: shells with divergent axis->colour mappings
 // would make the one cross-target comparison the gate exists for
 // meaningless. +x red, +y green, +z blue (REP-103).
 void AppendAxesGizmo(mjvScene* scn) {
@@ -64,7 +64,7 @@ void SimScene::Init(mjModel* m, mjData* d, const char* clock_source) {
   scene_valid_ = true;
   teleop_ready_ = teleop_.Init(m, d);
 
-  // Logged identically on both targets so the three-cause checklist in
+  // Logged identically on every target so the cause checklist in
   // docs/validation-*.md can be followed from either log. A non-floor
   // reference space is ~1.6 m, a bad UA floor estimate ~0.2 m, and a wrong
   // calibration is whatever this line says.
@@ -122,7 +122,7 @@ void SimScene::Advance(const InputState& in, double t_display_s) {
   // A LATENCY BOUND, in absolute seconds: 2*0.014/timestep + 1 = 15 steps at
   // a 2 ms timestep. 0.014 s was one frame at 72 Hz, so at a 90 Hz refresh
   // this silently becomes 2.7 frames rather than 2. Kept verbatim for parity
-  // across the two targets; the domain-correct form is 2*dt_measured.
+  // across every target; the domain-correct form is 2*dt_measured.
   const int cap = static_cast<int>(2.0*0.014/timestep) + 1;
   if (owed > cap) {
     // Overflow drops the residual as well as the steps: we are conceding the

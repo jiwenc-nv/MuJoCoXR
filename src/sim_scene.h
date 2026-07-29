@@ -10,14 +10,16 @@
 //
 // It is not an interface and takes no callback: the step loop is a bare
 // `for (s) mj_step(...)` and the shell does nothing between any two steps,
-// so there is nothing to call back into. Both shells are a two-call
+// so there is nothing to call back into. Every shell is a two-call
 // sequence, and everything platform-shaped stays below that line.
 //
 // Time crosses as an ABSOLUTE display timestamp in seconds and the core
-// derives dt. That is the whole point: each shell converts its runtime's
-// units exactly once, right next to the value that produced them (Android
-// nanoseconds, WebXR milliseconds), so the unit hazard cannot be got wrong
-// twice. dt, a clamp and an accumulator would have been three chances.
+// derives dt. That is the whole point: the conversion happens exactly once
+// per XR API, right next to the value that produced it (OpenXR nanoseconds in
+// XrShell::display_time_s, WebXR milliseconds in app/web/main.cc), so the unit
+// hazard cannot be got wrong twice — and adding a third SHELL did not add a
+// third conversion, which is the test that factoring passed. dt, a clamp and
+// an accumulator would have been three chances.
 
 #ifndef MUJOCOXR_SRC_SIM_SCENE_H_
 #define MUJOCOXR_SRC_SIM_SCENE_H_
@@ -61,10 +63,12 @@ class SimScene {
   // robot rather than under it.
   const mjvScene* Compose();
 
-  // Drop the clutch and re-latch the clock, on every session-end transition
-  // of BOTH shells: app/web/main.cc's mxr_end_session from the XRSession
-  // 'end' event, and app/android/main.cc on the session_running() true ->
-  // false edge. Without it a session that ends mid-clutch resumes with
+  // Drop the clutch and re-latch the clock, on every session-end transition,
+  // from TWO named sites: app/web/main.cc's mxr_end_session from the
+  // XRSession 'end' event, and XrShell::TakeSessionEndEdge() for both OpenXR
+  // shells, which latches the STOPPING/EXITING/LOSS_PENDING transition once
+  // so neither of them re-derives it. Without it a session that ends
+  // mid-clutch resumes with
   // engaged_ still true over a stale p_c0_, and with an accumulator holding
   // the entire time spent outside the session.
   void EndSession();

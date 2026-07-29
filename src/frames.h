@@ -1,11 +1,13 @@
 // Everything expressed in an XR reference space is declared here and
-// converted here, exactly once. Two runtimes feed this header — OpenXR
-// (LOCAL_FLOOR, with STAGE/LOCAL fallbacks) and WebXR ('local-floor') — so
-// the names say `xr`, never `stage`: OpenXR's STAGE is a distinct reachable
-// value of the same variable, and calling the whole class of spaces "stage"
-// is false whenever the fallback fires. Rules:
+// converted here, exactly once. Two XR APIs feed this header — OpenXR
+// (LOCAL_FLOOR, with STAGE/LOCAL fallbacks) and WebXR ('local-floor'). Two
+// APIs, not two runtimes: three shells speak them, and "runtime" now means
+// the other thing (CloudXR is one). So the names say `xr`, never `stage`:
+// OpenXR's STAGE is a distinct reachable value of the same variable, and
+// calling the whole class of spaces "stage" is false whenever the fallback
+// fires. Rules:
 //
-//   - Quaternions cross as xyzw (both XR runtimes); MuJoCo is [w,x,y,z].
+//   - Quaternions cross as xyzw (both XR APIs); MuJoCo is [w,x,y,z].
 //     Reorder on EVERY crossing.
 //   - R_mj_from_xr = Rz(-90deg) * Rx(+90deg). Axis map: XR -Z -> MJ +x,
 //     XR +Y -> MJ +z, XR +X -> MJ -y. Testable definition: a point 1 m in
@@ -23,7 +25,7 @@
 #include <mujoco/mujoco.h>
 
 // A handedness CONVENTION. It cannot be wrong at runtime: it is fixed by the
-// two specs (both XR runtimes are y-up / -z-forward, MuJoCo is REP-103 z-up)
+// two specs (both XR APIs are y-up / -z-forward, MuJoCo is REP-103 z-up)
 // and by the table in every assets/<id>/ar_scene.xml. If the axes gizmo is
 // wrong, this is the bug.
 static const mjtNum MXR_Q_MJ_FROM_XR[4] = {0.5, 0.5, -0.5, -0.5};  // wxyz
@@ -39,7 +41,7 @@ static const mjtNum MXR_Q_MJ_FROM_XR[4] = {0.5, 0.5, -0.5, -0.5};  // wxyz
 // reach — but the z=0 plane is the load-bearing part and is common. A new
 // assets/<id>/ar_scene.xml that floats its robot above the table, or thickens
 // it downward from z=0, silently invalidates the 0.73 for that scene only.
-// Both shells log the value at init; see the three-cause checklist in
+// Every shell logs the value at init; see the cause checklist in
 // docs/validation-*.md before editing it.
 static const mjtNum MXR_T_MJ_FROM_XR[3] = {-1.0, 0.0, -0.73};
 
@@ -53,11 +55,11 @@ static const mjtNum MXR_T_MJ_FROM_XR[3] = {-1.0, 0.0, -0.73};
 struct InputState {
   bool grip_valid = false;
   float grip_pos[3] = {0, 0, 0};       // XR reference space, metres
-  float grip_quat[4] = {0, 0, 0, 1};   // xyzw, the order both runtimes use
+  float grip_quat[4] = {0, 0, 0, 1};   // xyzw, the order both XR APIs use
   float trigger = 0;                   // [0,1]
   float squeeze = 0;                   // [0,1]
   // RAW LEVEL, not an edge: the core owns edge detection so one definition
-  // serves both shells. OpenXR's `currentState && changedSinceLastSync` at
+  // serves every shell. OpenXR's `currentState && changedSinceLastSync` at
   // one sync per frame already *is* a level diff, and WebXR's Gamepad has no
   // `changed` flag at all, so a shell-side edge would impose the weaker API
   // on both.
