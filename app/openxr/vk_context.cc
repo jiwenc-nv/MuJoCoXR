@@ -260,7 +260,7 @@ void VkContext::BeginEyePass(VkCommandBuffer cmd, int eye_index,
 
 void VkContext::EndEyePass(VkCommandBuffer cmd) { vkCmdEndRenderPass(cmd); }
 
-bool VkContext::SubmitAndWait(VkCommandBuffer cmd) {
+bool VkContext::Submit(VkCommandBuffer cmd) {
   vkEndCommandBuffer(cmd);
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.commandBufferCount = 1;
@@ -305,6 +305,12 @@ bool VkContext::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
   }
   vkBindBufferMemory(device_, *buffer, *memory, 0);
   return true;
+}
+
+void VkContext::WaitIdle() {
+  if (device_ != VK_NULL_HANDLE) {
+    vkDeviceWaitIdle(device_);
+  }
 }
 
 void VkContext::Destroy() {

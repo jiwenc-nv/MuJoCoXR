@@ -50,8 +50,15 @@ both resolve is a hard failure at load.
 Nothing else. In particular **no edit** to `src/ik_dls.{h,c}`,
 `src/teleop.{h,cc}`, `src/sim_scene.{h,cc}`, `src/frames.h`, `app/web/abi.h`,
 `app/web/shell.js`, `app/web/index.html`, `app/web/main.cc`,
-`app/android/AndroidManifest.xml`, `app/android/main.cc` or
-`app/android/assets.cc`.
+`app/android/AndroidManifest.xml`, `app/android/main.cc`,
+`app/android/assets.cc`, `app/openxr/*` or `app/linux/main.cc`.
+
+The last two are an EXTENSION OF THE CLAIM ONTO UNTESTED GROUND, and are
+weaker than the rest of the list: the Android and web paths have had a robot
+added through them and the trace checks below prove it, while nobody has yet
+added a robot with the Linux shell in the tree. It should hold for the same
+reason — the shells read the scene table and never name a robot — but it is
+reasoning, not a measurement.
 
 That claim is about a new **row**. A new **field** on `MxrScene` is a
 different matter: the web ABI's `mxr_menu_*` accessors are hand-written

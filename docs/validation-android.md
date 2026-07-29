@@ -3,21 +3,15 @@
 Ordered gates for bringing MuJoCoXR up on a Quest-class arm64-v8a headset.
 Run them in order — each later gate assumes the earlier ones hold.
 
-Gate numbers and titles are identical to
-[validation-web.md](validation-web.md), so "gate 3" means the same thing in
-both conversations. Every gate line carries exactly one of **PASS** (with
-date, machine and the measured number), **UN-RUN** (with `blocked on:`) or
-**N/A** — never blank. A gate as a whole may also be **PARTIAL**, which is
-not a fourth state for a line: it means the gate decomposes, and every
-PARTIAL must name a PASS half with its measured number and an UN-RUN half
-with its own `blocked on:`. A bare PARTIAL with no decomposition is the same
-as blank.
+Gate numbers, titles and the PASS / UN-RUN / N/A / PARTIAL legend are shared
+across every target and live in
+[validation-gates.md](validation-gates.md) — read that first if you have not.
 
-> **Read this before comparing the two documents.** Most gates here are
-> UN-RUN, and the web document has more green than this one. That is the true
-> state of the project, not an accident of who wrote what: the *newer* target
-> is the better-evidenced one, because it can be exercised without hardware.
-> Nothing in this repo has ever run on a headset.
+Most gates here are UN-RUN, and both other targets have more green. Why that
+inversion is real rather than an accident of who wrote what is in
+[validation-gates.md](validation-gates.md); the short version is that nothing
+in this repo has ever run on a headset, and this is the target that needs one
+most.
 
 Prereqs: Android NDK r26+ (`$ANDROID_NDK`), `glslangValidator`, a device
 authorized over adb. All commands run from the repo root.
@@ -173,11 +167,12 @@ is wrong, that is the bug. If only the height is wrong, it is not.
 
 72 Hz must hold with the full scene.
 
-**Passthrough alpha — unresolved on BOTH targets. Do not fix blind on one:**
+**Passthrough alpha — unresolved on ALL THREE targets. Do not fix blind on
+one:**
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Translucent decor (engaged marker α=0.5, idle α=0.35) looks washed out or too bright over passthrough | OpenXR `ALPHA_BLEND` is specified as **premultiplied**; `scene.frag` emits unpremultiplied | Both shaders need `rgb *= a` **and** the colour blend factor must become `ONE`. Two coupled changes — fix both targets together or they diverge. |
+| Translucent decor (engaged marker α=0.5, idle α=0.35) looks washed out or too bright over passthrough | OpenXR `ALPHA_BLEND` is specified as **premultiplied**; `scene.frag` emits unpremultiplied | Both shaders need `rgb *= a` **and** the colour blend factor must become `ONE`. Two coupled changes across **three targets and two shaders** — the Vulkan shader is shared by Android and Linux. Fix all three together or they diverge. |
 
 ## 4. Teleop acceptance
 
@@ -261,8 +256,11 @@ Requiring a headset:
   | ... `VISIBLE` → `SYNCHRONIZED` → `FOCUSED`, never `STOPPING` | grip poses stop locating, so `grip_valid` goes false | `teleop: clutch auto-disengaged (tracking lost)` |
 
   `session_running_` is cleared only on `STOPPING` / `EXITING` /
-  `LOSS_PENDING` (`xr_shell.cc:475-486`), so on a runtime that only drops
-  focus, the second row is the path taken and `EndSession` never fires.
+  `LOSS_PENDING` (`XrShell::HandleSessionStateChange` in
+  `app/openxr/xr_shell.cc`, which latches the edge that
+  `XrShell::TakeSessionEndEdge()` hands to the shell), so on a runtime that
+  only drops focus, the second row is the path taken and `EndSession` never
+  fires.
   Either row satisfies the acceptance above; a **third** outcome — clutch
   still engaged on resume — is the failure. On the `EndSession` path the
   clock also re-latches, so the first resumed frame has `dt = 0` rather than

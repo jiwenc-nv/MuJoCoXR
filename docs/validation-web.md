@@ -1,20 +1,13 @@
 # Validation — WebXR / browser
 
-Ordered gates for bringing MuJoCoXR up in a headset browser. Gate numbers and
-titles are identical to [validation-android.md](validation-android.md), so
-"gate 3" means the same thing in both conversations. Every gate line carries
-exactly one of **PASS** (with date, machine and the measured number),
-**UN-RUN** (with `blocked on:`) or **N/A** — never blank. A gate as a whole
-may also be **PARTIAL**, which is not a fourth state for a line: it means the
-gate decomposes, and every PARTIAL must name a PASS half with its measured
-number and an UN-RUN half with its own `blocked on:`. A bare PARTIAL with no
-decomposition is the same as blank.
+Ordered gates for bringing MuJoCoXR up in a headset browser. Gate numbers,
+titles and the PASS / UN-RUN / N/A / PARTIAL legend are shared across every
+target and live in [validation-gates.md](validation-gates.md) — read that
+first if you have not.
 
-> **This document has more green than the Android one, and that inversion is
-> real.** The reflex is to assume Android is the validated target and web is
-> the experiment. It is the reverse: no gate in this repo has ever been run
-> on a headset, and the web target is the one that can be exercised without
-> one. Do not read a PASS here as evidence about Android.
+This document has more green than the Android one; why that inversion is real
+is in [validation-gates.md](validation-gates.md). Do not read a PASS here as
+evidence about another target.
 
 ## Which target do I want?
 
@@ -383,7 +376,7 @@ and frame-period p99 stable. Thermal behaviour is device-only.
 | `recenter_edge asserted 4 frames running` | The shell is wiring a level where an edge is required | `shell.js`'s `recenterEdge` must be cleared each frame |
 | Entire scene ~1.6 m too high | A non-floor reference space was granted | Should be impossible — entry hard-fails; see gate 3 |
 | Gripper never closes | The robot's tabulated `gripper_closed`/`gripper_open` are outside the model's `actuator_ctrlrange` | `gripper endpoints (closed …, open …) fall outside '…' ctrlrange` at startup |
-| Translucent marker washed out over passthrough | The premultiplied-alpha question, unresolved on **both** targets | See the alpha row in validation-android.md gate 3 — fix both together |
+| Translucent marker washed out over passthrough | The premultiplied-alpha question, unresolved on **all three** targets | See the alpha row in validation-android.md gate 3 — three targets, two shaders; fix together |
 | The page loads a stale `shell.js` | Browser cache; the build copies it correctly | Hard-reload |
 
 ## Deliberately not here

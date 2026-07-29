@@ -3,8 +3,8 @@
 // xrCreateVulkanInstanceKHR/xrCreateVulkanDeviceKHR; render targets wrap the
 // XR swapchain images. One render pass per eye, no multiview (do-not-build).
 
-#ifndef MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
-#define MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
+#ifndef MUJOCOXR_APP_OPENXR_VK_CONTEXT_H_
+#define MUJOCOXR_APP_OPENXR_VK_CONTEXT_H_
 
 #include <vulkan/vulkan.h>
 
@@ -32,10 +32,7 @@ class VkContext {
   VkPhysicalDevice physical() const { return physical_; }
   VkInstance instance() const { return instance_; }
   uint32_t queue_family() const { return queue_family_; }
-  VkQueue queue() const { return queue_; }
   VkRenderPass render_pass() const { return render_pass_; }
-  VkFormat color_format() const { return color_format_; }
-  const EyeTarget& eye(int i) const { return eyes_[i]; }
 
   // Transparent black for passthrough AR; opaque color otherwise.
   void SetClearColor(float r, float g, float b, float a) {
@@ -49,12 +46,23 @@ class VkContext {
   VkCommandBuffer BeginFrameCommands();
   void BeginEyePass(VkCommandBuffer cmd, int eye, uint32_t image_index);
   void EndEyePass(VkCommandBuffer cmd);
-  bool SubmitAndWait(VkCommandBuffer cmd);
+  // Submits and does NOT wait — the wait is the vkWaitForFences at the top
+  // of the next BeginFrameCommands. It was called SubmitAndWait, which put
+  // one method that says it waits and does not beside WaitIdle(), which
+  // says it waits and does.
+  bool Submit(VkCommandBuffer cmd);
 
   uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags props);
   bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                     VkMemoryPropertyFlags props, VkBuffer* buffer,
                     VkDeviceMemory* memory);
+
+  // Block until the GPU is idle. Exposed separately from Destroy() because
+  // teardown has to interleave with the XR side: the runtime's swapchain
+  // images live on this device, so xrDestroySwapchain must run BEFORE
+  // vkDestroyDevice — and the last submitted frame must be finished before
+  // either. Shells call WaitIdle(), then XrShell::Destroy(), then Destroy().
+  void WaitIdle();
 
   void Destroy();
 
@@ -74,4 +82,4 @@ class VkContext {
   std::vector<EyeTarget> eyes_;
 };
 
-#endif  // MUJOCOXR_APP_ANDROID_VK_CONTEXT_H_
+#endif  // MUJOCOXR_APP_OPENXR_VK_CONTEXT_H_

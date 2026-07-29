@@ -1,11 +1,15 @@
 # MuJoCoXR
 
-MuJoCo physics running **fully on-device** on a standalone XR headset
-(Quest-class), with a robot arm teleoperated by an XR controller — a Franka
-Emika Panda or an SO-101, picked at load time.
-The MuJoCo C API with two thin shells over one shared core: raw
-OpenXR + Vulkan on Android, and WebXR + WebGL2 in the headset browser. No
-game engine, no Python in the app, no desktop in the loop.
+MuJoCo physics for a robot arm teleoperated by an XR controller — a Franka
+Emika Panda or an SO-101, picked at load time — running either **fully
+on-device** on a standalone XR headset (Quest-class) or on a Linux
+workstation streaming to one.
+The MuJoCo C API with three thin shells over one shared core: raw
+OpenXR + Vulkan on Android, WebXR + WebGL2 in the headset browser, and the
+same OpenXR + Vulkan shell on a Linux desktop against a streaming runtime
+(NVIDIA CloudXR). No game engine, no Python in the app, and no desktop
+*renderer* in the headset's loop — the Linux client streams, it does not
+tether a display.
 
 ## Features
 
@@ -21,6 +25,18 @@ game engine, no Python in the app, no desktop in the loop.
   checklist, all of it data —
   [docs/adding-a-robot.md](docs/adding-a-robot.md) is authoritative and this
   bullet deliberately does not restate the count.
+- **One OpenXR shell, two platforms** — `app/openxr/` is the session,
+  Vulkan context and renderer; `app/android/` and `app/linux/` are the entry
+  points, 3 files and 1 file respectively. A configure-time scan keeps the
+  shared tier free of platform headers, the mirror of the scan that keeps
+  `src/` free of graphics headers.
+- **Linux / CloudXR client** — the same shell against a desktop OpenXR
+  runtime, so a workstation GPU runs the physics and the render and the
+  headset receives frames. Requests OpenXR 1.1 (which is what makes
+  `LOCAL_FLOOR` reachable on a runtime that advertises no
+  `XR_EXT_local_floor`), waits for a headset to attach rather than failing,
+  and has a `--probe` mode that reports what the runtime accepted without
+  needing one.
 - **Raw OpenXR shell** — `NativeActivity` + Khronos loader:
   `XR_KHR_vulkan_enable2` device handshake, `LOCAL_FLOOR` reference space
   (STAGE/LOCAL fallbacks), full session lifecycle, Touch-controller action
@@ -74,6 +90,9 @@ game engine, no Python in the app, no desktop in the loop.
   (MuJoCo, OpenXR SDK and their dependencies are fetched and pinned)
 - Android NDK r26+ and `glslangValidator` (Debian/Ubuntu: `glslang-tools`)
   for the Android build
+- `glslang-tools`, `libvulkan-dev` and `libx11-dev` for the Linux build
+  (X11 is a configure-time requirement of the fetched OpenXR SDK, not a
+  run-time one — this app opens no window)
 - Android SDK build-tools + platform jar + a JDK for APK packaging
 - emsdk, pinned to **4.0.10**, for the browser build (see
   [docs/validation-web.md](docs/validation-web.md) for why the pin matters)
@@ -81,7 +100,7 @@ game engine, no Python in the app, no desktop in the loop.
 
 ## Build & run
 
-All three build scripts call `scripts/fetch-menagerie.sh` first, so the
+All four build scripts call `scripts/fetch-menagerie.sh` first, so the
 pinned sparse checkout of the Menagerie scenes happens on its own. Run it by
 hand only when you want the tree without a build — `docs/validation-android.md`
 pushes `third_party/menagerie` to the device directly.
@@ -92,8 +111,8 @@ Host tools and checks:
 scripts/build-host.sh                     # --no-checks to only build
 ```
 
-**Run this one before the other two.** It is the common prefix of all three
-targets, ~1 s incremental, and the only place the bitwise golden trace is
+**Run this one before the others.** It is the common prefix of every
+target, ~1 s incremental, and the only place the bitwise golden trace is
 compared: `teleop_replay` checks `trace_fnv1a` solely on the architecture its
 reference was recorded on, so a wasm run covers 15 of its 16 assertions and
 this covers all 16 — the missing one being exactly *did this change alter the
@@ -155,31 +174,54 @@ adb logcat -s mujocoxr
 [validation-android.md](docs/validation-android.md) gate 1 wants, since it
 pushes the CLI tools over adb and never needs an APK. `--help` for the rest.
 
+Linux / CloudXR client:
+
+```
+scripts/build-linux.sh
+cd /code && scripts/run_cloudxr_runtime.sh    # in another terminal
+build-linux/mujocoxr --probe                  # no headset needed
+build-linux/mujocoxr --scene franka
+```
+
+The runtime is a host-level singleton and this client never starts it. Robots
+are chosen with `--scene <id>` rather than by pressing B — there is no
+in-process scene swap on this target. Four environment traps stand between a
+fresh checkout and a working session, all of them presenting as the same
+`XR_ERROR_RUNTIME_UNAVAILABLE`; they are tabulated in
+[docs/validation-linux.md](docs/validation-linux.md).
+
 An existing MuJoCo checkout can be used instead of the download with
 `-DMUJOCOXR_MUJOCO_DIR=/path/to/mujoco` (must be v3.10.0).
 
 In the headset: squeeze to clutch the green target marker to your hand,
 trigger to close the gripper, A to reset the scene, B to cycle to the next
-robot (Android only — on the web, B ends the session and robots are picked
-from the page menu). Follow
-[docs/validation-android.md](docs/validation-android.md) for the ordered
-bring-up gates (benchmark → XR skeleton → handedness → teleop acceptance →
-soak). The browser target has the same five gates in
-[docs/validation-web.md](docs/validation-web.md), and more of them are
-green — nothing here has ever run on a headset.
+robot (Android only — on the web B ends the session and robots come from the
+page menu, and on Linux they come from `--scene`). Every target has the same
+five ordered bring-up gates, numbered identically and legended once in
+[docs/validation-gates.md](docs/validation-gates.md):
+[android](docs/validation-android.md) · [web](docs/validation-web.md) ·
+[linux](docs/validation-linux.md). **Nothing here has ever run on a headset**,
+so the greenest document is simply the target that needs one least — which is
+now Linux, where a live CloudXR session was brought up with no headset
+attached at all.
 
 ## Layout
 
-- `src/` — the portable core, shared by both shells and by the host tools:
+- `src/` — the portable core, shared by all three shells and the host tools:
   frame conventions, the robot/scene tables (`robot_spec`), clutched teleop,
   DLS IK, the frame loop (`sim_scene`), mesh building, rate limiter, logging,
   error hooks. What
   makes this a real tier is the `mxr_core` CMake target's restricted source
   list, built in the default host configuration on every build — not the
   directory name.
-- `app/android/` — the OpenXR + Vulkan shell: XR session, Vulkan context,
-  `mjvScene` renderer, APK asset loading, GLSL shaders, manifest and
-  packaging script
+- `app/openxr/` — the OpenXR + Vulkan shell shared by the Android and Linux
+  targets: XR session, Vulkan context, `mjvScene` renderer, GLSL shaders. The
+  inverse of `src/`'s rule — it exists to name Vulkan and OpenXR, and may not
+  name a platform; a configure-time scan enforces that
+- `app/android/` — the Android entry point: `android_main`, APK asset loading
+  through a VFS, the loader/create-info seam, manifest and packaging script
+- `app/linux/` — the Linux entry point: argument parsing, signal handling and
+  the frame loop, against a desktop OpenXR runtime
 - `app/web/` — the WebXR + WebGL2 shell: the C ABI (`abi.h`), renderer,
   GLSL ES shaders, `shell.js`, `index.html`
 - `host/` — host-side IK prototype (convergence + nullspace checks)
@@ -187,8 +229,9 @@ green — nothing here has ever run on a headset.
 - `baselines/` — recorded references: the cross-platform invariant, and one
   host teleop lock per scene (`teleop-<id>-host-x86_64.txt`)
 - `scripts/` — Menagerie scene fetcher (sparse, pinned), one build entry
-  point per target (`build-host.sh`, `build-web.sh`, `build-android.sh`), and
-  a TLS dev server for headsets that cannot be reached over adb
+  point per target (`build-host.sh`, `build-web.sh`, `build-android.sh`,
+  `build-linux.sh`), and a TLS dev server for headsets that cannot be reached
+  over adb
 - `docs/` — per-target validation guides with shared gate numbering, and
   [docs/adding-a-robot.md](docs/adding-a-robot.md)
 

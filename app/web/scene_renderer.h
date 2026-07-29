@@ -1,14 +1,15 @@
-// mjvScene -> WebGL2, the twin of app/android/scene_renderer.h and
+// mjvScene -> WebGL2, the twin of app/openxr/scene_renderer.h and
 // deliberately the same shape: MESH + BOX only, one program, one hardcoded
 // directional light, no textures/shadows/sorting. Geometry and appearance
-// constants come from src/mesh_buffers.h so both targets draw the same
-// pixels; only the API below differs.
+// constants come from src/mesh_buffers.h so both renderers draw the same
+// pixels; only the API below differs. RENDERERS, not targets — there are two
+// of these and three targets, because Android and Linux share the Vulkan one.
 //
 // Three things this twin does NOT mirror, all on purpose:
 //
 // There is no ProjFromFov. WebXR supplies XRView.projectionMatrix already
 // built and already in GL convention, so building one here would be a second
-// definition of clip space for the two targets to disagree about.
+// definition of clip space for the two renderers to disagree about.
 //
 // Indices are folded to ABSOLUTE at upload. WebGL2 has no base-vertex draw
 // call, and the alternative — teaching the shared builder to emit absolute
@@ -19,11 +20,14 @@
 // argument. The Vulkan twin has one because android_main returns into a live
 // process and app/android/main.cc calls SceneRenderer::Destroy() at two
 // points: at exit, and on every B-press, because switching scenes there means
-// rebuilding the model in-process. THIS renderer has no such caller and
+// rebuilding the model in-process. (app/linux/main.cc is on THIS side of the
+// contrast, not Android's: it loads one scene per process and picks it with
+// --scene, so it too has a single teardown at exit.) THIS renderer has no
+// such caller and
 // cannot acquire one, because app/web/shell.js switches scenes by navigating
 // to a new ?scene= — the page teardown reclaims the GL context, the wasm heap
 // and this object together, and it is also the only teardown that clears
-// SimScene's latched clock. So the two targets differ here because their
+// SimScene's latched clock. So the targets differ here because their
 // scene-switch mechanisms differ, not because one of them forgot.
 //
 // If you are adding a Destroy() here, the question to answer first is what

@@ -9,7 +9,7 @@
 // one arm at a time, and which arm that is comes from src/robot_spec.c — so
 // this file owns the RESOLUTION step as well: mj_name2id over that robot's
 // table row, once, into the id arrays below. Everything downstream (the task
-// loop in src/teleop.cc, both shells) reads resolved ids and never a name.
+// loop in src/teleop.cc, every shell) reads resolved ids and never a name.
 // The arm is 5 dofs on one shipped robot and 7 on the other; the task is 6D
 // on both, so J is 6xnarm and may be rank-deficient in either direction.
 
