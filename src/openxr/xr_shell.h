@@ -180,6 +180,24 @@ class XrShell {
   }
   int64_t swapchain_format() const { return swapchain_format_; }
   const std::vector<SwapchainInfo>& swapchains() const { return swapchains_; }
+
+  // DEPTH SUBMISSION, and the reason it is worth the second swapchain: a
+  // streaming runtime reprojects the last rendered frame to the head pose it
+  // has NOW, and without a depth buffer it can only rotate a flat image —
+  // which is why the symptom of not submitting depth is world-swim under head
+  // rotation that gets worse the faster you turn. Gated on the extension, NOT
+  // on the platform: Quest advertises it and reprojects too, so a Linux-only
+  // gate would be an artificial divergence inside this tier.
+  //
+  // False when the runtime does not advertise XR_KHR_composition_layer_depth.
+  // Everything below then behaves as it did before this existed, and
+  // VkContext falls back to an app-owned depth image — which is not dead code,
+  // it is the path any runtime without the extension takes, Android included.
+  bool depth_layer() const { return !depth_swapchains_.empty(); }
+  const std::vector<SwapchainInfo>& depth_swapchains() const {
+    return depth_swapchains_;
+  }
+  int64_t depth_swapchain_format() const { return depth_swapchain_format_; }
   // ALPHA_BLEND (passthrough AR) when the runtime offers it, else OPAQUE.
   bool passthrough() const {
     return blend_mode_ == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
@@ -190,6 +208,29 @@ class XrShell {
   bool LocateViews(XrTime time, std::vector<XrView>* views);
   bool AcquireSwapchainImage(int view, uint32_t* image_index);
   bool ReleaseSwapchainImage(int view);
+  // The depth swapchain cycles INDEPENDENTLY of the colour one — the runtime
+  // guarantees no relationship between the two acquired indices — so this is
+  // a separate acquire whose result must be carried separately. Assuming
+  // depth_index == color_index is the bug this API shape exists to prevent.
+  // No-ops returning true when depth_layer() is false.
+  bool AcquireDepthImage(int view, uint32_t* image_index);
+  bool ReleaseDepthImage(int view);
+
+  // Chains one XrCompositionLayerDepthInfoKHR per view into proj_views[i].next.
+  //
+  // THE LIFETIME IS THE WHOLE POINT OF THIS SIGNATURE. The chain is by
+  // POINTER and the runtime dereferences it inside xrEndFrame, so the depth
+  // infos must outlive that call. Filling a local in the per-view loop
+  // dangles and usually appears to work. Taking the vector by pointer forces
+  // the caller to own it in the same scope as proj_views, and the sizing
+  // happens here, once, before any address is taken.
+  // A no-op when depth_layer() is false.
+  // Takes no image index on purpose: XrSwapchainSubImage has none, because
+  // the runtime composites the most recently RELEASED image of the swapchain.
+  // The acquired depth index selects a FRAMEBUFFER and is a Vulkan-side
+  // concern only.
+  void ChainDepthInfo(std::vector<XrCompositionLayerProjectionView>* proj_views,
+                      std::vector<XrCompositionLayerDepthInfoKHR>* depth_infos);
   bool EndFrame(const XrFrameState& frame_state,
                 const std::vector<XrCompositionLayerProjectionView>& proj_views);
   // Fills every InputState field except recenter_edge (see PollEvents).
@@ -199,6 +240,8 @@ class XrShell {
 
  private:
   bool CreateAppSpace();
+  static bool AcquireFrom(const SwapchainInfo& sc, uint32_t* image_index);
+  static bool ReleaseFrom(const SwapchainInfo& sc);
   bool WaitForSystem(int system_wait_s);
   void HandleSessionStateChange(const XrEventDataSessionStateChanged& ev,
                                 bool* exit_render_loop);
@@ -225,8 +268,11 @@ class XrShell {
   XrTime time_epoch_ = 0;
   XrSessionState session_state_ = XR_SESSION_STATE_UNKNOWN;
   int64_t swapchain_format_ = 0;
+  int64_t depth_swapchain_format_ = 0;
+  bool depth_layer_ext_ = false;  // XR_KHR_composition_layer_depth
   std::vector<XrViewConfigurationView> config_views_;
   std::vector<SwapchainInfo> swapchains_;
+  std::vector<SwapchainInfo> depth_swapchains_;
 
   void LogInteractionProfiles();
 

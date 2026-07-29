@@ -105,7 +105,7 @@ Measured 2026-07-29, x86_64, against `NVIDIA™ CloudXR™ Runtime 6.1.0` built
 from `/code/CXR/Runtime`, **no headset attached**:
 
 ```
-[mujocoxr I] OpenXR runtime: NVIDIA™ CloudXR™ Runtime 'HEAD-HASH-NOTFOUND' 6.1.0, API 1.1 granted (local_floor_ext=0)
+[mujocoxr I] OpenXR runtime: NVIDIA™ CloudXR™ Runtime 'HEAD-HASH-NOTFOUND' 6.1.0, API 1.1 granted (local_floor_ext=0, depth_layer_ext=1)
 [mujocoxr I] environment blend mode: ALPHA_BLEND (passthrough)
 [mujocoxr I] suggested bindings: /interaction_profiles/oculus/touch_controller
 [mujocoxr I] suggested bindings: /interaction_profiles/khr/simple_controller
@@ -114,10 +114,15 @@ from `/code/CXR/Runtime`, **no headset attached**:
 [mujocoxr I] reference space: LOCAL_FLOOR
 [mujocoxr I] swapchain 0: 2048x1792, 3 images, format 43
 [mujocoxr I] swapchain 1: 2048x1792, 3 images, format 43
+[mujocoxr I] depth swapchain 0: 2048x1792, 3 images, format 126
+[mujocoxr I] depth swapchain 1: 2048x1792, 3 images, format 126
 [mujocoxr I] session state -> IDLE / READY / SYNCHRONIZED / VISIBLE / FOCUSED
 ```
 
-`format 43` is `VK_FORMAT_R8G8B8A8_SRGB`, the first preference.
+`format 43` is `VK_FORMAT_R8G8B8A8_SRGB` and `format 126` is
+`VK_FORMAT_D32_SFLOAT`, each the first preference in its list — and both
+chosen by intersecting `xrEnumerateSwapchainFormats`, not by asking the
+device what it supports.
 
 **The headless half of this gate — runnable with no headset, and with the
 service down.** (There is no "gate 0": the gate numbers are the same five on
@@ -162,6 +167,9 @@ and the first two are answered by the traps table above rather than restated:
    controller, **not** that the bindings are wrong.
 5. `sim deficit` lines with no picture mean physics runs and rendering does
    not; `dt has been 0` means the reverse.
+6. Picture fine but the world swims when you turn your head? That is not a
+   "nothing" — it is depth. Check `depth_layer_ext=1` and the two
+   `depth swapchain N:` lines; see gate 3.
 
 ### Interaction profiles — which fallback you actually get
 
@@ -233,6 +241,39 @@ down the table; do not start by editing the constant.
 
 `MXR_Q_MJ_FROM_XR` is the other kind of constant: a handedness **convention**
 fixed by two specs, which cannot be "wrong for this room".
+
+### Depth submission and reprojection
+
+**Status: PARTIAL.** Everything up to and including submitting depth every
+frame is **PASS**; whether reprojection actually looks better is **UN-RUN** —
+`blocked on: a CloudXR-connected headset.`
+
+A streaming runtime reprojects the last rendered frame to the head pose it has
+*now*. Without a depth buffer it can only rotate a flat image, and the symptom
+is world-swim under head rotation that gets worse the faster you turn. This
+client submits depth when the runtime advertises
+`XR_KHR_composition_layer_depth`, which CloudXR does.
+
+Measured 2026-07-29, no headset attached:
+
+- extension advertised and enabled — `depth_layer_ext=1` on the runtime line
+- a depth swapchain per view, `2048x1792`, 3 images, `VK_FORMAT_D32_SFLOAT`
+- 298 frames submitted with depth chained into every projection view, with no
+  `xrEndFrame` error — a malformed chain fails there, so this is a real check
+- clean `SIGINT` teardown with both swapchains live
+
+**The no-extension fallback was exercised too**, by forcing the probe to false
+in a scratch build: no depth swapchain, app-owned depth image, 123 frames,
+exit 0. That is the path **Android** takes on any runtime lacking the
+extension, and it had never been run before.
+
+What to look for with a headset:
+
+| Symptom | Cause | What to check |
+|---|---|---|
+| World swims / rubber-bands under head rotation, worse the faster you turn | Depth is not reaching the runtime, so it is rotating a flat image instead of reprojecting | `depth_layer_ext=1` **and** two `depth swapchain N:` lines at startup. Either missing means the app-owned fallback is in use |
+| Geometry at one distance reprojects correctly, everything else smears | `nearZ`/`farZ` do not match the projection actually used | `src/mesh_buffers.h`'s `kNearZ`/`kFarZ` are the same constants `ProjFromFov` builds the matrix from; they cannot disagree unless one is edited alone |
+| Foreground and background swap under reprojection | Reversed-Z mismatch: the spec signals reversal by `nearZ > farZ`, and this projection is standard Z (near→0, far→1) | `ChainDepthInfo` in `src/openxr/xr_shell.cc` — the comment there records the arithmetic that was checked |
 
 **Passthrough alpha — unresolved on ALL THREE targets. Do not fix blind on
 one:** OpenXR `ALPHA_BLEND` is specified as premultiplied and `scene.frag`

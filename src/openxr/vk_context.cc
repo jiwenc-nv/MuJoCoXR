@@ -94,15 +94,25 @@ bool VkContext::Create(XrShell* xr) {
 bool VkContext::InitRenderTargets(XrShell* xr) {
   color_format_ = static_cast<VkFormat>(xr->swapchain_format());
 
-  // Depth format: prefer D32, fall back to D24S8.
-  for (VkFormat f : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT,
-                     VK_FORMAT_D16_UNORM}) {
-    VkFormatProperties props;
-    vkGetPhysicalDeviceFormatProperties(physical_, f, &props);
-    if (props.optimalTilingFeatures &
-        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-      depth_format_ = f;
-      break;
+  // WHERE THE DEPTH FORMAT COMES FROM DEPENDS ON WHO OWNS THE IMAGE. When the
+  // runtime hands us a depth swapchain, the format is ITS choice out of
+  // xrEnumerateSwapchainFormats and the device's opinion is not the question;
+  // asking vkGetPhysicalDeviceFormatProperties instead would be answering a
+  // different one and could pick a format the runtime will not accept.
+  // Without the extension we own the image, so the device is exactly right.
+  const bool runtime_depth = xr->depth_layer();
+  if (runtime_depth) {
+    depth_format_ = static_cast<VkFormat>(xr->depth_swapchain_format());
+  } else {
+    for (VkFormat f : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT,
+                       VK_FORMAT_D16_UNORM}) {
+      VkFormatProperties props;
+      vkGetPhysicalDeviceFormatProperties(physical_, f, &props);
+      if (props.optimalTilingFeatures &
+          VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+        depth_format_ = f;
+        break;
+      }
     }
   }
   if (depth_format_ == VK_FORMAT_UNDEFINED) {
@@ -122,7 +132,14 @@ bool VkContext::InitRenderTargets(XrShell* xr) {
   atts[1].format = depth_format_;
   atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
   atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  // STORE ONLY WHEN SOMEONE WILL READ IT, and that is the whole difference
+  // this feature makes to the render pass: submitted depth is consumed by the
+  // runtime's reprojection AFTER the pass ends, so discarding it here would
+  // hand the runtime undefined contents — a correctness bug that looks like a
+  // reprojection-quality bug. With no depth layer nothing reads it and
+  // DONT_CARE is a real saving on a tiler, which is Android's case.
+  atts[1].storeOp = runtime_depth ? VK_ATTACHMENT_STORE_OP_STORE
+                                  : VK_ATTACHMENT_STORE_OP_DONT_CARE;
   atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
   atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -155,44 +172,66 @@ bool VkContext::InitRenderTargets(XrShell* xr) {
     eye.width = sc.width;
     eye.height = sc.height;
 
-    VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    di.imageType = VK_IMAGE_TYPE_2D;
-    di.format = depth_format_;
-    di.extent = {static_cast<uint32_t>(sc.width),
-                 static_cast<uint32_t>(sc.height), 1};
-    di.mipLevels = 1;
-    di.arrayLayers = 1;
-    di.samples = VK_SAMPLE_COUNT_1_BIT;
-    di.tiling = VK_IMAGE_TILING_OPTIMAL;
-    di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if (!VkOk(vkCreateImage(device_, &di, nullptr, &eye.depth_image),
-              "vkCreateImage(depth)")) {
-      return false;
-    }
-    VkMemoryRequirements mem_reqs;
-    vkGetImageMemoryRequirements(device_, eye.depth_image, &mem_reqs);
-    VkMemoryAllocateInfo mem_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    mem_info.allocationSize = mem_reqs.size;
-    mem_info.memoryTypeIndex = FindMemoryType(
-        mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (!VkOk(vkAllocateMemory(device_, &mem_info, nullptr, &eye.depth_memory),
-              "vkAllocateMemory(depth)")) {
-      return false;
-    }
-    vkBindImageMemory(device_, eye.depth_image, eye.depth_memory, 0);
+    // ---- depth views: M of them, from whichever side owns the images ----
+    if (runtime_depth) {
+      const auto& dsc = xr->depth_swapchains()[i];
+      eye.depth_views.resize(dsc.images.size());
+      for (size_t img = 0; img < dsc.images.size(); ++img) {
+        VkImageViewCreateInfo dv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        dv.image = dsc.images[img].image;
+        dv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        dv.format = depth_format_;
+        dv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        if (!VkOk(vkCreateImageView(device_, &dv, nullptr,
+                                    &eye.depth_views[img]),
+                  "vkCreateImageView(depth swapchain)")) {
+          return false;
+        }
+      }
+    } else {
+      VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+      di.imageType = VK_IMAGE_TYPE_2D;
+      di.format = depth_format_;
+      di.extent = {static_cast<uint32_t>(sc.width),
+                   static_cast<uint32_t>(sc.height), 1};
+      di.mipLevels = 1;
+      di.arrayLayers = 1;
+      di.samples = VK_SAMPLE_COUNT_1_BIT;
+      di.tiling = VK_IMAGE_TILING_OPTIMAL;
+      di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      if (!VkOk(vkCreateImage(device_, &di, nullptr, &eye.depth_image),
+                "vkCreateImage(depth)")) {
+        return false;
+      }
+      VkMemoryRequirements mem_reqs;
+      vkGetImageMemoryRequirements(device_, eye.depth_image, &mem_reqs);
+      VkMemoryAllocateInfo mem_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+      mem_info.allocationSize = mem_reqs.size;
+      mem_info.memoryTypeIndex = FindMemoryType(
+          mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (!VkOk(vkAllocateMemory(device_, &mem_info, nullptr,
+                                 &eye.depth_memory),
+                "vkAllocateMemory(depth)")) {
+        return false;
+      }
+      vkBindImageMemory(device_, eye.depth_image, eye.depth_memory, 0);
 
-    VkImageViewCreateInfo dv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    dv.image = eye.depth_image;
-    dv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    dv.format = depth_format_;
-    dv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-    if (!VkOk(vkCreateImageView(device_, &dv, nullptr, &eye.depth_view),
-              "vkCreateImageView(depth)")) {
-      return false;
+      eye.depth_views.resize(1);
+      VkImageViewCreateInfo dv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+      dv.image = eye.depth_image;
+      dv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      dv.format = depth_format_;
+      dv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+      if (!VkOk(vkCreateImageView(device_, &dv, nullptr, &eye.depth_views[0]),
+                "vkCreateImageView(depth)")) {
+        return false;
+      }
     }
 
+    // ---- colour views, and the N*M framebuffer table --------------------
+    const size_t ndepth = eye.depth_views.size();
     eye.color_views.resize(sc.images.size());
-    eye.framebuffers.resize(sc.images.size());
+    eye.framebuffers.resize(sc.images.size()*ndepth);
     for (size_t img = 0; img < sc.images.size(); ++img) {
       VkImageViewCreateInfo cv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
       cv.image = sc.images[img].image;
@@ -204,18 +243,21 @@ bool VkContext::InitRenderTargets(XrShell* xr) {
                 "vkCreateImageView(color)")) {
         return false;
       }
-      VkImageView attachments[2] = {eye.color_views[img], eye.depth_view};
-      VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-      fb.renderPass = render_pass_;
-      fb.attachmentCount = 2;
-      fb.pAttachments = attachments;
-      fb.width = sc.width;
-      fb.height = sc.height;
-      fb.layers = 1;
-      if (!VkOk(vkCreateFramebuffer(device_, &fb, nullptr,
-                                    &eye.framebuffers[img]),
-                "vkCreateFramebuffer")) {
-        return false;
+      for (size_t d = 0; d < ndepth; ++d) {
+        VkImageView attachments[2] = {eye.color_views[img],
+                                      eye.depth_views[d]};
+        VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fb.renderPass = render_pass_;
+        fb.attachmentCount = 2;
+        fb.pAttachments = attachments;
+        fb.width = sc.width;
+        fb.height = sc.height;
+        fb.layers = 1;
+        if (!VkOk(vkCreateFramebuffer(device_, &fb, nullptr,
+                                      &eye.framebuffers[img*ndepth + d]),
+                  "vkCreateFramebuffer")) {
+          return false;
+        }
       }
     }
   }
@@ -233,7 +275,7 @@ VkCommandBuffer VkContext::BeginFrameCommands() {
 }
 
 void VkContext::BeginEyePass(VkCommandBuffer cmd, int eye_index,
-                             uint32_t image_index) {
+                             uint32_t color_index, uint32_t depth_index) {
   const EyeTarget& eye = eyes_[eye_index];
   VkClearValue clears[2];
   clears[0].color = {{clear_color_[0], clear_color_[1], clear_color_[2],
@@ -241,7 +283,9 @@ void VkContext::BeginEyePass(VkCommandBuffer cmd, int eye_index,
   clears[1].depthStencil = {1.0f, 0};
   VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
   rp.renderPass = render_pass_;
-  rp.framebuffer = eye.framebuffers[image_index];
+  // The two indices are independent — see EyeTarget::framebuffers.
+  rp.framebuffer =
+      eye.framebuffers[color_index*eye.depth_views.size() + depth_index];
   rp.renderArea = {{0, 0},
                    {static_cast<uint32_t>(eye.width),
                     static_cast<uint32_t>(eye.height)}};
@@ -323,8 +367,11 @@ void VkContext::Destroy() {
       for (auto view : eye.color_views) {
         vkDestroyImageView(device_, view, nullptr);
       }
-      if (eye.depth_view) {
-        vkDestroyImageView(device_, eye.depth_view, nullptr);
+      // The VIEWS are ours either way and are always destroyed here; the
+      // IMAGES behind them belong to the runtime when there is a depth
+      // swapchain, which is why only the app-owned pair below is guarded.
+      for (auto view : eye.depth_views) {
+        vkDestroyImageView(device_, view, nullptr);
       }
       if (eye.depth_image) {
         vkDestroyImage(device_, eye.depth_image, nullptr);
