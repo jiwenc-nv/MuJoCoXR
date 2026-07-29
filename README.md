@@ -81,43 +81,32 @@ game engine, no Python in the app, no desktop in the loop.
 
 ## Build & run
 
-Fetch the robot scenes (sparse, pinned; used by host tools and the APK):
+All three build scripts call `scripts/fetch-menagerie.sh` first, so the
+pinned sparse checkout of the Menagerie scenes happens on its own. Run it by
+hand only when you want the tree without a build — `docs/validation-android.md`
+pushes `third_party/menagerie` to the device directly.
+
+Host tools and gates:
 
 ```
-scripts/fetch-menagerie.sh
+scripts/build-host.sh                     # --no-gates to only build
 ```
 
-Host tools (IK prototype + baseline recorder):
-
-```
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-./build/ik_prototype third_party/menagerie/franka_emika_panda/scene.xml
-./build/baseline     third_party/menagerie/franka_emika_panda/scene.xml
-./build/teleop_replay build/franka/ar_scene.xml \
-    --ref baselines/teleop-franka-host-x86_64.txt
-./build/teleop_replay build/so101/ar_scene.xml \
-    --ref baselines/teleop-so101-host-x86_64.txt
-```
-
-Both must print `replay_check = PASS`. One reference per scene, named for
-the scene id; `baseline` and `testspeed` stay Franka-only (see the `nu < 8`
-comment in `bench/baseline.cc`).
-
-The host build is the common prefix of all three targets — it compiles and
-links the entire portable core, so it is the fastest way to find out whether
-a change to physics, teleop or frame conventions broke anything.
+**Run this one before the other two.** It is the common prefix of all three
+targets, ~1 s incremental, and the only place the bitwise golden trace is
+compared: `teleop_replay` checks `trace_fnv1a` solely on the architecture its
+reference was recorded on, so the wasm gate runs 15 of 16 checks and this runs
+16 — the missing one being exactly *did this change alter the trajectory at
+all*. It also runs the cross-architecture dynamics invariant, which stays
+Franka-only (see the `nu < 8` comment in `bench/baseline.cc`).
 
 Browser app (Quest Browser, or desktop Chrome's DevTools WebXR panel):
 
 ```
-emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
-cmake --build build-web --parallel --target mxr baseline teleop_replay
-cd build-web && python3 -m http.server 8000   # then open http://localhost:8000
+scripts/build-web.sh                      # --no-gates to only build
 ```
 
-Build **named targets only, never `all`** — upstream's wasm subdirectory is
-added unconditionally under Emscripten and writes into the source tree.
+Serving is a separate step — see below.
 
 ### On a headset
 
@@ -130,6 +119,7 @@ Prefer adb. It needs no certificate and no warning to click through, because
 localhost is trusted by definition:
 
 ```
+cd build-web && python3 -m http.server 8000
 adb reverse tcp:8000 tcp:8000                      # over USB
 # wireless: adb tcpip 5555 && adb connect <headset-ip>:5555, then reverse
 ```
@@ -157,16 +147,13 @@ before anything else — the port has to be reachable.
 Headset app:
 
 ```
-cmake -S . -B build-android \
-  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
-  -DANDROID_STL=c++_shared -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS="-D_POSIX_C_SOURCE=200809L"
-cmake --build build-android --parallel
-app/android/package-apk.sh build-android mujocoxr.apk
-adb install -r mujocoxr.apk
+scripts/build-android.sh --install
 adb logcat -s mujocoxr
 ```
+
+`--no-apk` stops after the build — the configuration
+[validation-android.md](docs/validation-android.md) gate 1 wants, since it
+pushes the CLI tools over adb and never needs an APK. `--help` for the rest.
 
 An existing MuJoCo checkout can be used instead of the download with
 `-DMUJOCOXR_MUJOCO_DIR=/path/to/mujoco` (must be v3.10.0).
@@ -199,8 +186,9 @@ green — nothing here has ever run on a headset.
 - `bench/` — invariant baseline recorder/checker, teleop replay, `testspeed`
 - `baselines/` — recorded references: the cross-platform invariant, and one
   host teleop lock per scene (`teleop-<id>-host-x86_64.txt`)
-- `scripts/` — Menagerie scene fetcher (sparse, pinned), and a TLS dev
-  server for headsets that cannot be reached over adb
+- `scripts/` — Menagerie scene fetcher (sparse, pinned), one build entry
+  point per target (`build-host.sh`, `build-web.sh`, `build-android.sh`), and
+  a TLS dev server for headsets that cannot be reached over adb
 - `docs/` — per-target validation guides with shared gate numbering, and
   [docs/adding-a-robot.md](docs/adding-a-robot.md)
 

@@ -337,9 +337,23 @@ if(EMSCRIPTEN)
   # into a headset browser, ~33 -> ~52 MB, and THAT is the one worth fixing;
   # the per-scene fallback is deferred, deliberately, and noted below.
   set(MXR_WASM_PRELOAD)
+  set(MXR_WASM_PRELOAD_DEPS)
   foreach(id ${MXR_SCENE_IDS})
     list(APPEND MXR_WASM_PRELOAD
          "SHELL:--preload-file ${MXR_STAGE_ROOT}/${id}@/${id}")
+    # A preloaded file is baked into <target>.data at LINK time, and a link
+    # OPTION is opaque to CMake's dependency graph. Measured: edit
+    # assets/so101/ar_scene.xml, rebuild, and configure re-stages
+    # build-web/so101/ar_scene.xml correctly while the .data keeps the OLD
+    # scene — so the browser and the wasm gate both run a scene that is not
+    # the one in the build tree, with nothing to say so.
+    #
+    # Only the XML is listed. It is what changes under a first-party edit,
+    # and a mesh change means a Menagerie bump, which rewrites the staged
+    # tree at configure time and relinks through CMAKE_CONFIGURE_DEPENDS
+    # anyway. Listing ~90 mesh files per scene would buy nothing over that.
+    file(GLOB mxr_scene_xml CONFIGURE_DEPENDS ${MXR_STAGE_ROOT}/${id}/*.xml)
+    list(APPEND MXR_WASM_PRELOAD_DEPS ${mxr_scene_xml})
   endforeach()
 
   # `scene` is <id>/<file>: the ONE scene whose absence should stop the build
@@ -351,6 +365,16 @@ if(EMSCRIPTEN)
       # The references travel with the binary, so the gate is one command
       # with no host-filesystem access and no NODERAWFS.
       "SHELL:--preload-file ${CMAKE_CURRENT_SOURCE_DIR}/baselines@/baselines")
+    # ...and travelling with the binary means they are baked into
+    # <target>.data at LINK time, which CMake cannot infer from a link option.
+    # Without this, editing a baseline and re-running the wasm gate CHECKS THE
+    # OLD REFERENCE AND REPORTS PASS while the host gate reports FAIL on the
+    # same edit — measured, not hypothetical. LINK_DEPENDS makes the .data a
+    # function of the references it claims to carry.
+    file(GLOB mxr_wasm_refs CONFIGURE_DEPENDS
+         ${CMAKE_CURRENT_SOURCE_DIR}/baselines/*)
+    set_property(TARGET ${target} APPEND PROPERTY
+                 LINK_DEPENDS "${mxr_wasm_refs};${MXR_WASM_PRELOAD_DEPS}")
     if(NOT EXISTS ${MXR_STAGE_ROOT}/${scene})
       message(FATAL_ERROR
         "${target} needs the staged scene at ${MXR_STAGE_ROOT}/${scene} — run "
@@ -402,6 +426,10 @@ if(EMSCRIPTEN)
     # of `foreach` here plus a fetch in shell.js, deferred until someone
     # measures a load on a headset browser.
     ${MXR_WASM_PRELOAD})
+  # Same reason as mxr_wasm_cli's: without it, editing a scene re-stages the
+  # build tree and leaves mxr.data carrying the previous one.
+  set_property(TARGET mxr APPEND PROPERTY
+               LINK_DEPENDS "${MXR_WASM_PRELOAD_DEPS}")
   set_target_properties(mxr PROPERTIES OUTPUT_NAME mxr SUFFIX ".js")
 
   # The page and the shell sit beside the generated mxr.js so the whole web
