@@ -86,24 +86,24 @@ pinned sparse checkout of the Menagerie scenes happens on its own. Run it by
 hand only when you want the tree without a build — `docs/validation-android.md`
 pushes `third_party/menagerie` to the device directly.
 
-Host tools and gates:
+Host tools and checks:
 
 ```
-scripts/build-host.sh                     # --no-gates to only build
+scripts/build-host.sh                     # --no-checks to only build
 ```
 
 **Run this one before the other two.** It is the common prefix of all three
 targets, ~1 s incremental, and the only place the bitwise golden trace is
 compared: `teleop_replay` checks `trace_fnv1a` solely on the architecture its
-reference was recorded on, so the wasm gate runs 15 of 16 checks and this runs
-16 — the missing one being exactly *did this change alter the trajectory at
-all*. It also runs the cross-architecture dynamics invariant, which stays
-Franka-only (see the `nu < 8` comment in `bench/baseline.cc`).
+reference was recorded on, so a wasm run covers 15 of its 16 assertions and
+this covers all 16 — the missing one being exactly *did this change alter the
+trajectory at all*. It also runs the cross-architecture dynamics invariant,
+which stays Franka-only (see the `nu < 8` comment in `bench/baseline.cc`).
 
 Browser app (Quest Browser, or desktop Chrome's DevTools WebXR panel):
 
 ```
-scripts/build-web.sh                      # --no-gates to only build
+scripts/build-web.sh                      # --no-checks to only build
 ```
 
 Serving is a separate step — see below.

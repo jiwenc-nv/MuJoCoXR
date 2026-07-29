@@ -1,11 +1,11 @@
 #!/bin/sh
-# Build the WebXR app into build-web/ and run one wasm gate per staged scene.
+# Build the WebXR app into build-web/ and run one wasm check per staged scene.
 #
-# Usage: build-web.sh [--no-gates]
+# Usage: build-web.sh [--no-checks]
 # Env:   EMSDK (default ~/emsdk), BUILD_DIR (default build-web),
 #        BUILD_TYPE (default Release)
 #
-# --no-gates is for when you want an artifact to poke at and the gates are
+# --no-checks is for when you want an artifact to poke at and the checks are
 # legitimately red. Measured, they cost 1.4 s against a 2.1 s no-op build and
 # ~27 s for a real one, so there is no case for skipping them to save time.
 #
@@ -17,18 +17,18 @@
 #
 # What this encodes beyond the raw cmake lines: activating emsdk from a
 # POSIX shell, the pinned-version warning, named-targets-only, and reading
-# the gate verdict off the exit code. Each is commented at its site.
+# the check verdict off the exit code. Each is commented at its site.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-build-web}
 BUILD_TYPE=${BUILD_TYPE:-Release}
 EMSDK=${EMSDK:-$HOME/emsdk}
-run_gates=1
+run_checks=1
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --no-gates) run_gates=0 ;;
+    --no-checks) run_checks=0 ;;
     -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build-web.sh: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -48,7 +48,7 @@ missing=""
 command -v cmake >/dev/null || missing="$missing
   cmake — apt install cmake"
 # node is not checked: it ships inside emsdk, so the emsdk entry above
-# already covers the only thing the gates need beyond the build.
+# already covers the only thing the checks need beyond the build.
 if [ -n "$missing" ]; then
   echo "build-web.sh: missing prerequisites:$missing" >&2
   exit 1
@@ -56,7 +56,7 @@ fi
 
 # emcc is not on PATH in a fresh shell even when emsdk is installed; sourcing
 # emsdk_env.sh is what puts it there — and it also puts emsdk's own node on
-# PATH, which is what runs the wasm gates below. Do it only if needed, so an
+# PATH, which is what runs the wasm checks below. Do it only if needed, so an
 # already activated shell is left alone.
 #
 # THE `cd` IS REQUIRED, not tidiness. emsdk_env.sh locates itself through
@@ -113,8 +113,8 @@ cmake --build "$BUILD_DIR" --parallel --target mxr baseline teleop_replay
 echo
 echo "built: $BUILD_DIR/mxr.js, mxr.wasm, mxr.data (+ baseline, teleop_replay)"
 
-# ---- gates -----------------------------------------------------------------
-if [ $run_gates -eq 1 ]; then
+# ---- checks ----------------------------------------------------------------
+if [ $run_checks -eq 1 ]; then
   echo
   # The scene ids are the STAGED DIRECTORY NAMES, not a list kept here. CMake
   # derives those from mxr_stage_scene(), which derives them from
@@ -126,10 +126,10 @@ if [ $run_gates -eq 1 ]; then
     id=$(basename "$(dirname "$scene_xml")")
     ref=baselines/teleop-$id-host-x86_64.txt
     if [ ! -f "$ROOT/$ref" ]; then
-      echo "gate $id: SKIPPED — no $ref"
+      echo "check $id: SKIPPED — no $ref"
       continue
     fi
-    printf 'gate %s: ' "$id"
+    printf 'check %s: ' "$id"
     # THE EXIT CODE IS THE VERDICT, not a grep. bench/teleop_replay.cc puts
     # every diagnostic — including the `replay_check = PASS` line — on
     # STDERR, because stdout is exactly the recordable block that
@@ -150,8 +150,8 @@ if [ $run_gates -eq 1 ]; then
     rm -f "$log"
   done
   # The bitwise trace hash is skipped off its recording architecture by
-  # design, so a wasm PASS is the model-independent half of the gate: frame
+  # design, so a wasm PASS is the model-independent half of the check: frame
   # conventions, engage jump, slew compliance, the census, the solver config
   # block and pos_med. See bench/teleop_replay.cc.
-  [ $fail -eq 0 ] || { echo "build-web.sh: a gate failed" >&2; exit 1; }
+  [ $fail -eq 0 ] || { echo "build-web.sh: a check failed" >&2; exit 1; }
 fi
